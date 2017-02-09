@@ -2,6 +2,8 @@
 *.o
 *.a
 *.so
+doc/oci-uid-hook.1
+oci-uid-hook
 
 # Folders
 _obj
