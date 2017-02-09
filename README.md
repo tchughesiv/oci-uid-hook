@@ -9,15 +9,16 @@ When enabled, a linux container's username will be recognized even when using an
 Hook detects when an arbitrary uid is passed at container runtime and modifies a container's /etc/passwd file (via bind mount) so that username and group permissions continue to function as expected.
 
 ### Hook engages IF -
- - passed 'uid' is different than User defined in the image
+
+ - specified 'uid' is different than User defined in the image
  
  AND
  
- - said 'uid' is an integer
+ - specified 'uid' is an integer
 
  AND
 
- - said 'uid' does not match an existing username in /etc/passwd
+ - specified 'uid' does not match an existing username in /etc/passwd
 
 ### Tested w/ -
 ```json
