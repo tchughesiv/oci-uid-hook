@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 
+	"path"
+
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -143,10 +145,11 @@ func main() {
 		log.Fatalf("UIDHook Failed %v", err.Error())
 	}
 
-	// passwdPath := fmt.Sprintf("/proc/%d/root/etc", state.Pid)
 	configFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 	configFile2 := os.Args[2]
 	command := os.Args[1]
+	cpath := path.Dir(configFile2)
+	newPasswd := fmt.Sprintf("%s/passwd", cpath)
 
 	// get additional container info
 	jsonFile2, err := ioutil.ReadFile(configFile2)
@@ -157,9 +160,12 @@ func main() {
 	switch command {
 	case "prestart":
 		{
-			log.Printf("UIDHook: %s %s", command, state.ID)
-			if err = UIDHook(containerJSON.Config.Image, state.ID, int(state.Pid), configFile, configFile2, user); err != nil {
-				log.Fatalf("UIDHook failed: %v", err)
+			// proceed only if a new passwd file does not exist ... won't engage on pre-existing containers
+			if _, err := os.Stat(newPasswd); os.IsNotExist(err) {
+				log.Printf("UIDHook: %s %s", command, state.ID)
+				if err = UIDHook(containerJSON.Config.Image, state.ID, int(state.Pid), configFile, configFile2, user, newPasswd); err != nil {
+					log.Fatalf("UIDHook failed: %v", err)
+				}
 			}
 			return
 		}
@@ -172,7 +178,7 @@ func main() {
 }
 
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(image string, id string, pid int, configFile string, configFile2 string, user string) error {
+func UIDHook(image string, id string, pid int, configFile string, configFile2 string, user string, newPasswd string) error {
 	os.Setenv("DOCKER_API_VERSION", apiVersion)
 	//	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -226,7 +232,6 @@ func UIDHook(image string, id string, pid int, configFile string, configFile2 st
 	}
 	cpasswd, err := ioutil.ReadAll(cfile)
 
-	newPasswd := fmt.Sprintf("%s/passwd", state.BundlePath)
 	var username string
 	var usergid string
 	var usercheck bool
