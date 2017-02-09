@@ -109,6 +109,11 @@
 			"Rev": "1d3f6e4aaf8e83787a22017bd686c6d04c727710"
 		},
 		{
+			"ImportPath": "github.com/docker/engine-api/client/transport",
+			"Comment": "v0.4.0-66-g4290f40",
+			"Rev": "4290f40c056686fcaa5c9caf02eac1dde9315adf"
+		},
+		{
 			"ImportPath": "github.com/docker/go-connections/nat",
 			"Comment": "v0.2.1-20-g7da10c8",
 			"Rev": "7da10c8c50cad14494ec818dcdfb6506265c0086"
@@ -132,11 +137,6 @@
 			"ImportPath": "github.com/opencontainers/go-digest",
 			"Comment": "v1.0.0-rc0",
 			"Rev": "aa2ec055abd10d26d539eb630a92241b781ce4bc"
-		},
-		{
-			"ImportPath": "github.com/opencontainers/runc/libcontainer/user",
-			"Comment": "v1.0.0-rc2-269-gb263a43",
-			"Rev": "b263a43430ac6996a4302b891688544225197294"
 		},
 		{
 			"ImportPath": "github.com/pkg/errors",

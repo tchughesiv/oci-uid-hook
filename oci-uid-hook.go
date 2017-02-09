@@ -12,29 +12,64 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
+	"github.com/docker/engine-api/client/transport"
 	"github.com/docker/go-connections/nat"
 	"gopkg.in/yaml.v1"
 )
 
+// CONFIG uid hook configuration
+const CONFIG = "/etc/oci-uid-hook.conf" // Config file for disabling hook
+const apiVersion = "1.24"               // docker server api version
+
+var state State
+var containerJSON ContainerJSON
+var settings struct {
+	Disabled bool `yaml:"disabled"`
+}
+
+// FileInfo allows init check for container etc dir
+type FileInfo struct {
+	Name    string
+	Size    int64
+	Mode    os.FileMode
+	ModTime time.Time
+	IsDir   bool
+}
+
+// Client is the API client that performs all operations
+// against a docker server.
+type Client struct {
+	// host holds the server address to connect to
+	host string
+	// proto holds the client protocol i.e. unix.
+	proto string
+	// addr holds the client address.
+	addr string
+	// basePath holds the path to prepend to the requests.
+	basePath string
+	// transport is the interface to send request with, it implements transport.Client.
+	transport transport.Client
+	// version of the server to talk to.
+	version string
+	// custom http headers configured by users.
+	customHTTPHeaders map[string]string
+}
+
 // State holds information about the runtime state of the container.
 type State struct {
-	// Version is the version of the specification that is supported.
-	Version string `json:"version"`
-	// ID is the container ID
-	ID string `json:"id"`
-	// Status is the runtime state of the container.
-	Status string `json:"status"`
-	// Pid is the process ID for the container process.
-	Pid int `json:"pid"`
-	// BundlePath is the path to the container's bundle directory.
-	BundlePath string `json:"bundlePath"`
-	// Annotations are the annotations associated with the container.
-	Annotations map[string]string `json:"annotations"`
+	Version     string            `json:"version"`     // Version is the version of the specification that is supported.
+	ID          string            `json:"id"`          // ID is the container ID
+	Status      string            `json:"status"`      // Status is the runtime state of the container.
+	Pid         int               `json:"pid"`         // Pid is the process ID for the container process.
+	BundlePath  string            `json:"bundlePath"`  // BundlePath is the path to the container's bundle directory.
+	Annotations map[string]string `json:"annotations"` // Annotations are the annotations associated with the container.
 }
 
 // ContainerJSON is newly used struct along with MountPoint
@@ -83,15 +118,6 @@ type Config struct {
 	Shell           strslice.StrSlice     `json:",omitempty"` // Shell for shell-form of RUN, CMD, ENTRYPOINT
 }
 
-// CONFIG file for disabling hook
-const CONFIG = "/etc/oci-uid-hook.conf"
-
-var state State
-var containerJSON ContainerJSON
-var settings struct {
-	Disabled bool `yaml:"disabled"`
-}
-
 func main() {
 	logwriter, err := syslog.New(syslog.LOG_NOTICE, "oci-uid-hook")
 	if err == nil {
@@ -117,7 +143,7 @@ func main() {
 		log.Fatalf("UIDHook Failed %v", err.Error())
 	}
 
-	passwdFile := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
+	// passwdPath := fmt.Sprintf("/proc/%d/root/etc", state.Pid)
 	configFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 	configFile2 := os.Args[2]
 	command := os.Args[1]
@@ -127,20 +153,14 @@ func main() {
 	json.Unmarshal(jsonFile2, &containerJSON)
 	ugidresult := strings.Split(containerJSON.Config.User, ":")
 	user := ugidresult[0]
-	// group := ugidresult[1]
-
-	log.Printf("UIDHook: %s %s", command, state.ID)
 
 	switch command {
 	case "prestart":
 		{
-			if err = UIDHook(containerJSON.Config.Image, state.ID, int(state.Pid), configFile, configFile2, passwdFile, user); err != nil {
+			log.Printf("UIDHook: %s %s", command, state.ID)
+			if err = UIDHook(containerJSON.Config.Image, state.ID, int(state.Pid), configFile, configFile2, user); err != nil {
 				log.Fatalf("UIDHook failed: %v", err)
 			}
-			return
-		}
-	case "poststart":
-		{
 			return
 		}
 	case "poststop":
@@ -148,23 +168,24 @@ func main() {
 			return
 		}
 	}
-	log.Fatalf("Invalid command %q must be prestart|poststart|poststop", command)
+	log.Fatalf("Invalid command %q must be prestart|poststop", command)
 }
 
-// UIDHook for arbitrary uid on the host system
-func UIDHook(image string, id string, pid int, configFile string, configFile2 string, passwdFile string, user string) error {
-	apiVersion := "1.24"
+// UIDHook for username recognition w/ arbitrary uid in the container
+func UIDHook(image string, id string, pid int, configFile string, configFile2 string, user string) error {
 	os.Setenv("DOCKER_API_VERSION", apiVersion)
-	ctx := context.Background()
+	//	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
 	cli, err := client.NewEnvClient()
 	if err != nil {
-		panic(err)
+		return nil
 	}
 
 	// retrieve image user
 	imageJSON, imageOUT, err := cli.ImageInspectWithRaw(ctx, image)
 	if err != nil {
-		panic(err)
+		return nil
 	}
 	_ = imageOUT
 	imageUser := imageJSON.Config.User
@@ -178,43 +199,72 @@ func UIDHook(image string, id string, pid int, configFile string, configFile2 st
 	if _, err := strconv.Atoi(user); err != nil {
 		return nil
 	}
+	useruid := user
 
-	useruid, err := strconv.Atoi(user)
-
-	// search passwd file
-	f, err := ioutil.ReadFile(passwdFile)
-	if err != nil {
-		return err
+	// retrieve passwd file from container
+	imageName := imageJSON.ID
+	containerConfig := &container.Config{
+		Image:      imageName,
+		Entrypoint: []string{""},
+		Cmd:        []string{""},
 	}
+	tcuid, err := cli.ContainerCreate(ctx, containerConfig, nil, nil, "")
+	if err != nil {
+		panic(err)
+	}
+	cfile, stat, err := cli.CopyFromContainer(ctx, tcuid.ID, "/etc/passwd")
+	if err != nil {
+		panic(err)
+	}
+	_ = stat
+	crm := cli.ContainerRemove(ctx, tcuid.ID, types.ContainerRemoveOptions{
+		RemoveVolumes: true,
+		Force:         true,
+	})
+	if crm != nil {
+		panic(err)
+	}
+	cpasswd, err := ioutil.ReadAll(cfile)
 
-	// pwFile := string(f)
-	// re := regexp.MustCompile(`\W+:x:` + imageUser + `:`)
-	// res := re.Find(f)
-	// convert shell logic to golang -
-	//   Username=`grep \:x\:${User_image_uid}\: /proc/${Pid}/root/etc/passwd | awk -F ':' {'print $1'}`
-	//   Usergid=`grep \:x\:${User_image_uid}\: /proc/${Pid}/root/etc/passwd | awk -F ':' {'print $4'}`
-	//   User_check=`grep \:x\:${Useruid}\: /proc/${Pid}/root/etc/passwd | awk -F ':' {'print $1'}`
-	//   if [ ! -z "${Username}" ] && [ -z "${User_check}" ]; then
-
-	// create new passwd file in BundlePath
-	lines := strings.Split(string(f), "\n")
 	newPasswd := fmt.Sprintf("%s/passwd", state.BundlePath)
+	var username string
+	var usergid string
+	var usercheck bool
 
-	// os.Link(passwdFile, newPasswd)
+	lines := strings.Split(string(cpasswd), "\n")
 	for i, line := range lines {
-		if strings.Contains(line, imageUser) {
-			lines[i] = ""
+		if strings.Contains(line, ":x:"+imageUser+":") {
+			uidline := strings.Split(lines[i], ":")
+			username = uidline[0]
+			usergid = uidline[3]
+		}
+		if strings.Contains(line, ":x:"+useruid+":") {
+			usercheck = true
 		}
 	}
-	// find/replace
+
+	// create copy of passwd file in BundlePath
 	output := strings.Join(lines, "\n")
 	err = ioutil.WriteFile(newPasswd, []byte(output), 0644)
 	if err != nil {
 		log.Fatalln(err)
 	}
 
-	log.Printf("UIDHook engaged: %d %s %s", useruid, passwdFile, newPasswd)
+	// ensure specified uid doesn't already match image username
+	if username != "" {
+		if usercheck != true {
+			log.Printf("UIDHook engaged: %s:x:%s:%s - %s", username, useruid, usergid, newPasswd)
+			replace(username, imageUser, useruid, newPasswd)
+		}
+	}
+	return nil
+}
+
+func replace(username string, imageUser string, useruid string, newPasswd string) {
+	// find/replace w/ new uid
+
+	// sed "s@${Username}:x:${User_image_uid}:@${Username}:x:${Useruid}:@g" /proc/${Pid}/root/etc/passwd > ${containers_dir}/${ID}/passwd
 
 	// bind mount newPasswd into container @ /etc/passwd
-	return nil
+	return
 }
