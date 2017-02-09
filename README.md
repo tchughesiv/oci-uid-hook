@@ -1,5 +1,5 @@
 # oci-uid-hook
-[![Go Report Card](https://goreportcard.com/badge/github.com/tchughesiv/oci-uid-hook)](https://goreportcard.com/badge/github.com/tchughesiv/oci-uid-hook)
+[![Go Report Card](https://goreportcard.com/badge/github.com/tchughesiv/oci-uid-hook)](https://goreportcard.com/report/github.com/tchughesiv/oci-uid-hook)
 
 ### Status: pre-alpha
 
