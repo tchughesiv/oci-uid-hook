@@ -11,7 +11,7 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
 
 ### Hook engages IF -
 
- - the specified 'uid' is different than the User defined in the image
+ - the specified 'uid' is different than the "User" defined in the image
  
  AND
  
