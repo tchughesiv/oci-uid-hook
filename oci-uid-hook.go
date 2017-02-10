@@ -21,7 +21,6 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/strslice"
 	"github.com/docker/docker/client"
-	"github.com/docker/engine-api/client/transport"
 	"github.com/docker/go-connections/nat"
 	"gopkg.in/yaml.v1"
 )
@@ -43,25 +42,6 @@ type FileInfo struct {
 	Mode    os.FileMode
 	ModTime time.Time
 	IsDir   bool
-}
-
-// Client is the API client that performs all operations
-// against a docker server.
-type Client struct {
-	// host holds the server address to connect to
-	host string
-	// proto holds the client protocol i.e. unix.
-	proto string
-	// addr holds the client address.
-	addr string
-	// basePath holds the path to prepend to the requests.
-	basePath string
-	// transport is the interface to send request with, it implements transport.Client.
-	transport transport.Client
-	// version of the server to talk to.
-	version string
-	// custom http headers configured by users.
-	customHTTPHeaders map[string]string
 }
 
 // State holds information about the runtime state of the container.
@@ -145,7 +125,7 @@ func main() {
 		log.Fatalf("UIDHook Failed %v", err.Error())
 	}
 
-	configFile := fmt.Sprintf("%s/config.json", state.BundlePath)
+	// configFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 	configFile2 := os.Args[2]
 	command := os.Args[1]
 	cpath := path.Dir(configFile2)
@@ -163,7 +143,7 @@ func main() {
 			// proceed only if a new passwd file does not exist ... won't engage on pre-existing containers
 			if _, err := os.Stat(newPasswd); os.IsNotExist(err) {
 				log.Printf("UIDHook: %s %s", command, state.ID)
-				if err = UIDHook(containerJSON.Config.Image, state.ID, int(state.Pid), configFile, configFile2, user, newPasswd); err != nil {
+				if err = UIDHook(containerJSON.Config.Image, state.ID, user, newPasswd); err != nil {
 					log.Fatalf("UIDHook failed: %v", err)
 				}
 			}
@@ -178,7 +158,7 @@ func main() {
 }
 
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(image string, id string, pid int, configFile string, configFile2 string, user string, newPasswd string) error {
+func UIDHook(image string, id string, user string, newPasswd string) error {
 	os.Setenv("DOCKER_API_VERSION", apiVersion)
 	//	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
