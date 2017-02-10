@@ -40,7 +40,7 @@ func main() {
 		log.SetOutput(logwriter)
 	}
 
-	// then config file settings
+	// config file settings
 	data, err := ioutil.ReadFile(CONFIG)
 	if err != nil {
 		if !os.IsNotExist(err) {
@@ -68,6 +68,9 @@ func main() {
 
 	// get additional container info
 	jsonFile2, err := ioutil.ReadFile(configFile2)
+	if err != nil {
+		log.Fatalln(err)
+	}
 	json.Unmarshal(jsonFile2, &containerJSON)
 	ugidresult := strings.Split(containerJSON.Config.User, ":")
 	user := ugidresult[0]
@@ -75,7 +78,7 @@ func main() {
 	switch command {
 	case "prestart":
 		{
-			// proceed only if a new passwd file does not exist ... won't engage on pre-existing containers
+			// proceed only if an external passwd file does not exist ... don't engage hook on pre-existing containers
 			if _, err := os.Stat(newPasswd); os.IsNotExist(err) {
 				log.Printf("UIDHook: %s %s", command, state.ID)
 				if err = UIDHook(containerJSON.Config.Image, state.ID, user, procPasswd, cpath, newPasswd); err != nil {
@@ -99,13 +102,13 @@ func UIDHook(image string, id string, user string, procPasswd string, cpath stri
 	defer cancel()
 	cli, err := client.NewEnvClient()
 	if err != nil {
-		return nil
+		log.Fatalln(err)
 	}
 
 	// retrieve image user
 	imageJSON, imageOUT, err := cli.ImageInspectWithRaw(ctx, image)
 	if err != nil {
-		return nil
+		log.Fatalln(err)
 	}
 	_ = imageOUT
 	imageUser := imageJSON.Config.User
