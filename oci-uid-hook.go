@@ -29,6 +29,7 @@ const CONFIG = "/etc/oci-uid-hook.conf" // Config file for disabling hook
 const apiVersion = "1.24"               // docker server api version
 var state State
 var containerJSON types.ContainerJSON
+var mountPoints types.MountPoint
 var settings struct {
 	Disabled bool `yaml:"disabled"`
 }
@@ -254,7 +255,7 @@ func mount(id string, username string, imageUser string, useruid string, newPass
 	//	if err != nil {
 	//		log.Fatal(err)
 	//	}
-	log.Printf("passwd file mount: %v", containerJSON.Mounts)
+	log.Printf("passwd file mount: %v", containerJSON.MountPoints)
 	return
 }
 

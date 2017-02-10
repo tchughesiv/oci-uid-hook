@@ -331,6 +331,7 @@ type ContainerJSONBase struct {
 type ContainerJSON struct {
 	*ContainerJSONBase
 	Mounts          []MountPoint
+	MountPoints     map[string]*MountPoint
 	Config          *container.Config
 	NetworkSettings *NetworkSettings
 }
