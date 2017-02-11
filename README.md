@@ -1,4 +1,4 @@
-# oci-uid-hook
+# OCI UID Hook
 [![Go Report Card](https://goreportcard.com/badge/github.com/tchughesiv/oci-uid-hook)](https://goreportcard.com/report/github.com/tchughesiv/oci-uid-hook)
 
 ### Status: pre-alpha
@@ -25,11 +25,9 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
 
  - /etc/passwd does not already exist as a bind mount
 
-### Tested w/ -
+### Tested w/ the following on RHEL7 -
 ```json
-"runc version": 1.0.0-rc2
-"oci spec": 1.0.0-rc2-dev
-"docker Version": 1.12.5
 "docker API version": 1.24
-"go version": go1.7.5
+"docker Version": 1.12.5
+"runc version": 1.0.0-rc2
 ```
