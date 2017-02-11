@@ -21,6 +21,10 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
 
  - the specified 'uid' does not already exist in /etc/passwd
 
+ AND
+
+ - /etc/passwd does not already exist as a bind mount
+
 ### Tested w/ -
 ```json
 "runc version": 1.0.0-rc2

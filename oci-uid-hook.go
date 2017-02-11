@@ -28,20 +28,9 @@ import (
 const CONFIG = "/etc/oci-uid-hook.conf" // Config file for disabling hook
 const apiVersion = "1.24"               // docker server api version
 var state State
-var containerJSON types.ContainerJSON
-var mountPoints types.MountPoint
+var containerJSON ContainerJSON
 var settings struct {
 	Disabled bool `yaml:"disabled"`
-}
-
-// State holds information about the runtime state of the container.
-type State struct {
-	Version     string            `json:"version"`     // Version is the version of the specification that is supported.
-	ID          string            `json:"id"`          // ID is the container ID
-	Status      string            `json:"status"`      // Status is the runtime state of the container.
-	Pid         int               `json:"pid"`         // Pid is the process ID for the container process.
-	BundlePath  string            `json:"bundlePath"`  // BundlePath is the path to the container's bundle directory.
-	Annotations map[string]string `json:"annotations"` // Annotations are the annotations associated with the container.
 }
 
 func main() {
@@ -71,9 +60,9 @@ func main() {
 	}
 
 	// configFile := fmt.Sprintf("%s/config.json", state.BundlePath)
+	// procPasswd := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
 	configFile2 := os.Args[2]
 	command := os.Args[1]
-	procPasswd := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
 	cpath := path.Dir(configFile2)
 	newPasswd := fmt.Sprintf("%s/passwd", cpath)
 
@@ -83,18 +72,22 @@ func main() {
 		log.Fatalln(err)
 	}
 	json.Unmarshal(jsonFile2, &containerJSON)
+
 	ugidresult := strings.Split(containerJSON.Config.User, ":")
 	user := ugidresult[0]
+	pwMount := containerJSON.MountPoints.MountPoint.Destination
 
 	switch command {
 	case "prestart":
 		{
-			// proceed only if an external passwd file does not exist ... don't engage hook on pre-existing containers
-			if _, err := os.Stat(newPasswd); os.IsNotExist(err) {
-				log.Printf("%s %s %v", command, state.ID, string(jsonFile2))
-				if err = UIDHook(containerJSON.Config.Image, state.ID, user, procPasswd, cpath, newPasswd); err != nil {
-					log.Fatalf("UIDHook failed: %v", err)
-				}
+			// check for existing /etc/passwd bind mount... bypass if exists
+			if pwMount != "" {
+				log.Printf("Hook bypassed: /etc/passwd already bind mounted")
+				return
+			}
+
+			log.Printf("%s %s", command, state.ID)
+			if err = UIDHook(containerJSON.Config.Image, state.ID, user, cpath, newPasswd); err != nil {
 			}
 			return
 		}
@@ -107,7 +100,7 @@ func main() {
 }
 
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(image string, id string, user string, procPasswd string, cpath string, newPasswd string) error {
+func UIDHook(image string, id string, user string, cpath string, newPasswd string) error {
 	//	ctx := context.Background()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -202,7 +195,7 @@ func UIDHook(image string, id string, user string, procPasswd string, cpath stri
 	// ensure specified uid doesn't already match image username
 	if username != "" {
 		if usercheck != true {
-			log.Printf("hook engaged: %s %s", newPasswd, procPasswd)
+			log.Printf("hook engaged: %s", newPasswd)
 			replace(findS, replaceS, lines, newPasswd)
 			mount(id, username, imageUser, useruid, newPasswd)
 		}
@@ -230,9 +223,8 @@ func replace(findS string, replaceS string, lines []string, newPasswd string) {
 }
 
 func mount(id string, username string, imageUser string, useruid string, newPasswd string) {
-	// !!!!!!!!!!!!!!!!!!!!!!!!!!
-	// modify the jsonFile2 directly??... add a /etc/passwd mount point
-	//	containerJSON.mountpoints{
+	// modify the jsonFile2 directly... add /etc/passwd bind mount
+	//	containerJSON.MountPoints{
 	//		"/etc/passwd": {
 	//			"Source":      newPasswd,
 	//			"Destination": "/etc/passwd",
@@ -246,16 +238,7 @@ func mount(id string, username string, imageUser string, useruid string, newPass
 	//		},
 	//	}
 
-	// bind mount newPasswd into container @ /etc/passwd
-	//	updatestatus, err := cli.ContainerUpdate(ctx, id, container.UpdateConfig{
-	//		Resources: container.Resources{
-	//			Devices: []string{""},
-	//		},
-	//	})
-	//	if err != nil {
-	//		log.Fatal(err)
-	//	}
-	log.Printf("passwd file mount: %v", containerJSON.MountPoints)
+	log.Printf("passwd file mount complete")
 	return
 }
 
@@ -295,4 +278,39 @@ func untar(tarball, target string) error {
 		}
 	}
 	return nil
+}
+
+// State holds information about the runtime state of the container.
+type State struct {
+	Version     string            `json:"version"`     // Version is the version of the specification that is supported.
+	ID          string            `json:"id"`          // ID is the container ID
+	Status      string            `json:"status"`      // Status is the runtime state of the container.
+	Pid         int               `json:"pid"`         // Pid is the process ID for the container process.
+	BundlePath  string            `json:"bundlePath"`  // BundlePath is the path to the container's bundle directory.
+	Annotations map[string]string `json:"annotations"` // Annotations are the annotations associated with the container.
+}
+
+// ContainerJSON is newly used struct along with MountPoint
+type ContainerJSON struct {
+	*types.ContainerJSONBase
+	Mounts      []MountPoint
+	MountPoints MountPointData
+	Config      *container.Config
+}
+
+// MountPointData represents a mount point configuration inside the container.
+// This is used for reporting the mountpoints in use by a container.
+type MountPointData struct {
+	MountPoint MountPoint `json:"/etc/passwd"`
+}
+
+// MountPoint represents a mount point configuration inside the container.
+// This is used for reporting the mountpoints in use by a container.
+type MountPoint struct {
+	Name        string `json:",omitempty"`
+	Source      string
+	Destination string
+	Driver      string `json:",omitempty"`
+	Mode        string
+	RW          bool
 }
