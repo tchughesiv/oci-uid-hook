@@ -134,6 +134,11 @@
 			"Rev": "aa2ec055abd10d26d539eb630a92241b781ce4bc"
 		},
 		{
+			"ImportPath": "github.com/opencontainers/runtime-spec/specs-go",
+			"Comment": "v1.0.0-rc4-8-g0d104bb",
+			"Rev": "0d104bb63cf1f6a7b5434eaf664a61147a0c796b"
+		},
+		{
 			"ImportPath": "github.com/pkg/errors",
 			"Comment": "v0.8.0-2-g248dadf",
 			"Rev": "248dadf4e9068a0b3e79f02ed0a610d935de5302"

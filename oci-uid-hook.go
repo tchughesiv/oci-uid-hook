@@ -21,17 +21,35 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"gopkg.in/yaml.v1"
 )
 
 // CONFIG uid hook configuration
 const CONFIG = "/etc/oci-uid-hook.conf" // Config file for disabling hook
 const apiVersion = "1.24"               // docker server api version
-var state State
+var state specs.State
 var containerJSON ContainerJSON
 var settings struct {
 	Disabled bool `yaml:"disabled"`
 }
+
+//	configFileName               = "config.v2.json"
+// https://github.com/docker/docker/blob/v1.12.5/libcontainerd/client.go
+// https://github.com/docker/docker/blob/v1.12.5/libcontainerd/client_linux.go
+// https://github.com/docker/docker/blob/v1.12.5/libcontainerd/container.go
+// https://github.com/docker/docker/tree/v1.12.5/libcontainerd
+//func (ctr *container) spec() (*specs.Spec, error) {
+//	var spec specs.Spec
+//	dt, err := ioutil.ReadFile(filepath.Join(ctr.dir, configFilename))
+//	if err != nil {
+//		return nil, err
+//	}
+//	if err := json.Unmarshal(dt, &spec); err != nil {
+//		return nil, err
+//	}
+//	return &spec, nil
+//}
 
 func main() {
 	os.Setenv("DOCKER_API_VERSION", apiVersion)
@@ -278,16 +296,6 @@ func untar(tarball, target string) error {
 		}
 	}
 	return nil
-}
-
-// State holds information about the runtime state of the container.
-type State struct {
-	Version     string            `json:"version"`     // Version is the version of the specification that is supported.
-	ID          string            `json:"id"`          // ID is the container ID
-	Status      string            `json:"status"`      // Status is the runtime state of the container.
-	Pid         int               `json:"pid"`         // Pid is the process ID for the container process.
-	BundlePath  string            `json:"bundlePath"`  // BundlePath is the path to the container's bundle directory.
-	Annotations map[string]string `json:"annotations"` // Annotations are the annotations associated with the container.
 }
 
 // ContainerJSON is newly used struct along with MountPoint
