@@ -53,7 +53,7 @@ var (
 type ContainerJSON struct {
 	*types.ContainerJSONBase
 	Mounts          []MountPoint
-	MountPoints     MountPoints
+	MountPoints     map[string]*MountPoint
 	Config          *container.Config
 	NetworkSettings *types.NetworkSettings
 }
@@ -65,7 +65,7 @@ type MountPs struct {
 
 // MountPoints represents a mount point configuration inside the container.
 type MountPoints struct {
-	MountPoint
+	MountPoint MountPoint
 }
 
 // MountPoint represents a mount point configuration inside the container.
