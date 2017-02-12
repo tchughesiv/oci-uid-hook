@@ -14,6 +14,11 @@
 			"Rev": "61e43dc76f7ee59a82bdf3d71033dc12bea4c77d"
 		},
 		{
+			"ImportPath": "github.com/bitly/go-simplejson",
+			"Comment": "v0.5.0-4-gda1a892",
+			"Rev": "da1a8928f709389522c8023062a3739f3b4af419"
+		},
+		{
 			"ImportPath": "github.com/docker/distribution/digestset",
 			"Comment": "v2.6.0-rc.1-128-gb1993c9",
 			"Rev": "b1993c95303df3d0214129d85382c3c573e4df20"

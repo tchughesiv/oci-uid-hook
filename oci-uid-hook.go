@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	simplejson "github.com/bitly/go-simplejson"
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -36,7 +37,7 @@ const (
 
 var (
 	spec          specs.Spec
-	state         specs.State
+	state         State
 	containerJSON ContainerJSON
 	check         string
 	username      string
@@ -49,29 +50,34 @@ var (
 	}
 )
 
+// State holds information about the runtime state of the container.
+type State struct {
+	// Version is the version of the specification that is supported.
+	Version string `json:"ociVersion"`
+	// ID is the container ID
+	ID string `json:"id"`
+	// Status is the runtime status of the container.
+	Status string `json:"status"`
+	// Pid is the process ID for the container process.
+	Pid int `json:"pid"`
+	// Bundle is the path to the container's bundle directory.
+	BundlePath string `json:"bundlepath"`
+	// Annotations are key values associated with the container.
+	Annotations map[string]string `json:"annotations,omitempty"`
+}
+
 // ContainerJSON is newly used struct along with MountPoint
 type ContainerJSON struct {
 	*types.ContainerJSONBase
-	Mounts          []MountPoint
-	MountPoints     map[string]*MountPoint
+	Mount           MountPoint `json:"mountpoints"`
 	Config          *container.Config
 	NetworkSettings *types.NetworkSettings
-}
-
-// MountPs represents a mount point configuration inside the container.
-type MountPs struct {
-	MountPoint `json:"/etc/passwd"`
-}
-
-// MountPoints represents a mount point configuration inside the container.
-type MountPoints struct {
-	MountPoint MountPoint
 }
 
 // MountPoint represents a mount point configuration inside the container.
 // This is used for reporting the mountpoints in use by a container.
 type MountPoint struct {
-	//	Type        mount.Type `json:",omitempty"`
+	Type        mount.Type `json:",omitempty"`
 	Source      string
 	Destination string
 	RW          bool
@@ -113,10 +119,14 @@ func main() {
 	if err := json.NewDecoder(os.Stdin).Decode(&state); err != nil {
 		log.Printf("UIDHook Failed %v", err.Error())
 	}
-	// newconfigFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 
+	newconfigFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 	// get additional container info
 	jsonFile, err := ioutil.ReadFile(configFile)
+	if err != nil {
+		log.Println(err)
+	}
+	newjsonFile, err := ioutil.ReadFile(newconfigFile)
 	if err != nil {
 		log.Println(err)
 	}
@@ -126,7 +136,7 @@ func main() {
 	switch command {
 	case "prestart":
 		{
-			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFile); err != nil {
+			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFile, newjsonFile, configFile); err != nil {
 			}
 			return
 		}
@@ -139,7 +149,7 @@ func main() {
 }
 
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(command string, image string, id string, cpath string, jsonFile []byte) error {
+func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, newjsonFile []byte, configFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
 	cli, _ := client.NewEnvClient()
@@ -166,7 +176,8 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 
 	log.Printf("%s %s", command, state.ID)
 
-	// check for existing /etc/passwd bind mount... bypass if exists
+	// check for existing /etc/passwd bind mount... bypass if exists.
+	// more iterative approach below... better?
 	pwMount := gjson.GetBytes(jsonFile, "MountPoints")
 	pwMount.ForEach(func(key, value gjson.Result) bool {
 		pwMountDest := gjson.Get(value.String(), "Destination")
@@ -178,6 +189,9 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 		})
 		return true // keep iterating
 	})
+
+	// faster but less thorough?
+	// _, mountcheck := containerJSON.MountPoints[pfile]
 
 	if mountcheck == true {
 		log.Printf("hook bypassed: %s already mounted", pfile)
@@ -215,7 +229,7 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	if username != "" {
 		if usercheck != true {
 			uidReplace(findS, replaceS, lines, newPasswd)
-			mountPasswd(newPasswd, jsonFile)
+			mountPasswd(newPasswd, jsonFile, newjsonFile, configFile)
 		}
 	}
 	return err
@@ -330,11 +344,10 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 }
 
 // mountPasswd bind mounts new passwd into container
-func mountPasswd(newPasswd string, jsonFile []byte) {
+func mountPasswd(newPasswd string, jsonFile []byte, newjsonFile []byte, configFile string) {
 	// modify the jsonFile2 directly... add /etc/passwd bind mount
-	// using types
-	mount := MountPs{
-		MountPoint{
+	mount2 := map[string]MountPoint{
+		pfile: MountPoint{
 			Source:      newPasswd,
 			Destination: pfile,
 			RW:          true,
@@ -346,38 +359,48 @@ func mountPasswd(newPasswd string, jsonFile []byte) {
 			ID:          "",
 		},
 	}
-	pf, _ := json.Marshal(mount)
+	pf2, _ := json.Marshal(mount2)
+	js, _ := simplejson.NewJson(jsonFile)
+	jsn, _ := simplejson.NewJson(pf2)
 
-	// using maps
-	mount2 := map[string]interface{}{
-		"MountPoints": map[string]interface{}{
-			pfile: map[string]interface{}{
-				"Source":      newPasswd,
-				"Destination": pfile,
-				"RW":          true,
-				"Name":        "",
-				"Driver":      "",
-				"Relabel":     "Z",
-				"Propagation": "rprivate",
-				"Named":       false,
-				"ID":          "",
-			},
-		},
-	}
-
-	pf2, err := json.Marshal(mount2)
+	// current mountpoints mapping
+	jsnMPs := js.Get("MountPoints")
+	jsnMPm, _ := jsnMPs.Map()
+	// new /etc/passwd bind mount mapping
+	jsnm, _ := jsn.Map()
+	// append new mountpoint to current ones
+	jsnMPm[pfile] = jsnm[pfile]
+	// current full config.v2.json mapping
+	jsnMm, _ := js.Map()
+	// append new combined mountpoints mapping to overall config
+	jsnMm["MountPoints"] = jsnMPm
+	jsonfinal, _ := json.Marshal(jsnMm)
+	// write new config file to disk
+	err := ioutil.WriteFile(configFile+"2", jsonfinal, 0666)
 	if err != nil {
-		fmt.Println("Error encoding JSON")
-		return
+		log.Println(err)
+	}
+	err2 := ioutil.WriteFile(configFile, jsonfinal, 0666)
+	if err2 != nil {
+		log.Println(err2)
 	}
 
-	// allm := append([]interface{}{containerJSON}, mstr)
-	// allm := append([]interface{}{containerJSON.MountPoints}, newmount)
-	// allm2 := append([]interface{}{string(jsonFile)}, []interface{}{string(pf2)})
-
-	//json.Unmarshal(allm2, &containerJSON)
-
-	//	log.Printf("%s mount complete - type = %v - maps = %v - %v", pfile, string(pf), string(pf2), allm2)
-	log.Printf("%s mount complete - type = %v - maps = %v - %v", pfile, string(pf), string(pf2), containerJSON.MountPoints)
+	log.Printf("%s mount complete", pfile)
+	log.Printf("new byte - %v %v", configFile+"2", configFile)
 	return
+}
+
+// AppendByte is good
+func AppendByte(slice []byte, data ...byte) []byte {
+	m := len(slice)
+	n := m + len(data)
+	if n > cap(slice) { // if necessary, reallocate
+		// allocate double what's needed, for future growth.
+		newSlice := make([]byte, (n+1)*2)
+		copy(newSlice, slice)
+		slice = newSlice
+	}
+	slice = slice[0:n]
+	copy(slice[m:n], data)
+	return slice
 }
