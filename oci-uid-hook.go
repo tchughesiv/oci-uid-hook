@@ -37,7 +37,7 @@ const (
 var (
 	spec          specs.Spec
 	state         specs.State
-	containerJSON types.ContainerJSON
+	containerJSON ContainerJSON
 	check         string
 	username      string
 	usercheck     bool
@@ -53,14 +53,19 @@ var (
 type ContainerJSON struct {
 	*types.ContainerJSONBase
 	Mounts          []MountPoint
-	MountPoints     *MountPoints
+	MountPoints     MountPoints
 	Config          *container.Config
 	NetworkSettings *types.NetworkSettings
 }
 
+// MountPs represents a mount point configuration inside the container.
+type MountPs struct {
+	MountPoint `json:"/etc/passwd"`
+}
+
 // MountPoints represents a mount point configuration inside the container.
 type MountPoints struct {
-	MountPoint `json:"/etc/passwd"`
+	MountPoint
 }
 
 // MountPoint represents a mount point configuration inside the container.
@@ -210,7 +215,7 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	if username != "" {
 		if usercheck != true {
 			uidReplace(findS, replaceS, lines, newPasswd)
-			mountPasswd(newPasswd)
+			mountPasswd(newPasswd, jsonFile)
 		}
 	}
 	return err
@@ -325,9 +330,10 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 }
 
 // mountPasswd bind mounts new passwd into container
-func mountPasswd(newPasswd string) {
+func mountPasswd(newPasswd string, jsonFile []byte) {
 	// modify the jsonFile2 directly... add /etc/passwd bind mount
-	mount := MountPoints{
+	// using types
+	mount := MountPs{
 		MountPoint{
 			Source:      newPasswd,
 			Destination: pfile,
@@ -340,12 +346,38 @@ func mountPasswd(newPasswd string) {
 			ID:          "",
 		},
 	}
+	pf, _ := json.Marshal(mount)
 
-	mountjson, _ := json.Marshal(mount)
-	// allm := append([]interface{}{containerJSON.MountPoints}, newmount)
-	// allm := append([]interface{}{containerJSON.MountPoints}, newmount)
-	// json.Unmarshal(allm, &MountPoints)
+	// using maps
+	mount2 := map[string]interface{}{
+		"MountPoints": map[string]interface{}{
+			pfile: map[string]interface{}{
+				"Source":      newPasswd,
+				"Destination": pfile,
+				"RW":          true,
+				"Name":        "",
+				"Driver":      "",
+				"Relabel":     "Z",
+				"Propagation": "rprivate",
+				"Named":       false,
+				"ID":          "",
+			},
+		},
+	}
 
-	log.Printf("%s mount complete - %v", pfile, string(mountjson))
+	pf2, err := json.Marshal(mount2)
+	if err != nil {
+		fmt.Println("Error encoding JSON")
+		return
+	}
+
+	// allm := append([]interface{}{containerJSON}, mstr)
+	// allm := append([]interface{}{containerJSON.MountPoints}, newmount)
+	// allm2 := append([]interface{}{string(jsonFile)}, []interface{}{string(pf2)})
+
+	//json.Unmarshal(allm2, &containerJSON)
+
+	//	log.Printf("%s mount complete - type = %v - maps = %v - %v", pfile, string(pf), string(pf2), allm2)
+	log.Printf("%s mount complete - type = %v - maps = %v - %v", pfile, string(pf), string(pf2), containerJSON.MountPoints)
 	return
 }
