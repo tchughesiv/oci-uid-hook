@@ -144,6 +144,14 @@
 			"Rev": "248dadf4e9068a0b3e79f02ed0a610d935de5302"
 		},
 		{
+			"ImportPath": "github.com/tidwall/gjson",
+			"Rev": "09d1c5c5bc64e094394dfe2150220d906c55ac37"
+		},
+		{
+			"ImportPath": "github.com/tidwall/match",
+			"Rev": "173748da739a410c5b0b813b956f89ff94730b4c"
+		},
+		{
 			"ImportPath": "golang.org/x/net/context",
 			"Rev": "236b8f043b920452504e263bc21d354427127473"
 		},

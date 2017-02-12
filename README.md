@@ -19,12 +19,12 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
 
  AND
 
- - the specified 'uid' does not already exist in /etc/passwd
+ - /etc/passwd does not already exist as a bind mount
 
  AND
 
- - /etc/passwd does not already exist as a bind mount
-
+ - the specified 'uid' does not already exist in /etc/passwd
+ 
 ### Tested w/ the following on RHEL7 -
 ```json
 "docker API version": 1.24

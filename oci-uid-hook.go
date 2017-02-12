@@ -20,8 +20,10 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/tidwall/gjson"
 	"gopkg.in/yaml.v1"
 )
 
@@ -35,10 +37,11 @@ const (
 var (
 	spec          specs.Spec
 	state         specs.State
-	containerJSON ContainerJSON
+	containerJSON types.ContainerJSON
 	check         string
 	username      string
 	usercheck     bool
+	mountcheck    bool
 	//usergid string
 
 	settings struct {
@@ -49,13 +52,30 @@ var (
 // ContainerJSON is newly used struct along with MountPoint
 type ContainerJSON struct {
 	*types.ContainerJSONBase
-	MountPoints MountPointData
-	Config      *container.Config
+	Mounts          []MountPoint
+	MountPoints     *MountPoints
+	Config          *container.Config
+	NetworkSettings *types.NetworkSettings
 }
 
-// MountPointData represents a mount point configuration inside the container.
-type MountPointData struct {
-	MountPoint types.MountPoint `json:"/etc/passwd"`
+// MountPoints represents a mount point configuration inside the container.
+type MountPoints struct {
+	MountPoint `json:"/etc/passwd"`
+}
+
+// MountPoint represents a mount point configuration inside the container.
+// This is used for reporting the mountpoints in use by a container.
+type MountPoint struct {
+	//	Type        mount.Type `json:",omitempty"`
+	Source      string
+	Destination string
+	RW          bool
+	Name        string
+	Driver      string
+	Relabel     string
+	Propagation mount.Propagation
+	Named       bool
+	ID          string
 }
 
 func main() {
@@ -96,11 +116,12 @@ func main() {
 		log.Println(err)
 	}
 	json.Unmarshal(jsonFile, &containerJSON)
+	// 	log.Printf(string(jsonFile))
 
 	switch command {
 	case "prestart":
 		{
-			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath); err != nil {
+			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFile); err != nil {
 			}
 			return
 		}
@@ -113,7 +134,7 @@ func main() {
 }
 
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(command string, image string, id string, cpath string) error {
+func UIDHook(command string, image string, id string, cpath string, jsonFile []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
 	cli, _ := client.NewEnvClient()
@@ -141,8 +162,19 @@ func UIDHook(command string, image string, id string, cpath string) error {
 	log.Printf("%s %s", command, state.ID)
 
 	// check for existing /etc/passwd bind mount... bypass if exists
-	pwMount := containerJSON.MountPoints.MountPoint.Destination
-	if pwMount != "" {
+	pwMount := gjson.GetBytes(jsonFile, "MountPoints")
+	pwMount.ForEach(func(key, value gjson.Result) bool {
+		pwMountDest := gjson.Get(value.String(), "Destination")
+		pwMountDest.ForEach(func(key, value2 gjson.Result) bool {
+			if value2.String() == pfile {
+				mountcheck = true
+			}
+			return true // keep iterating
+		})
+		return true // keep iterating
+	})
+
+	if mountcheck == true {
 		log.Printf("hook bypassed: %s already mounted", pfile)
 		return nil
 	}
@@ -178,7 +210,7 @@ func UIDHook(command string, image string, id string, cpath string) error {
 	if username != "" {
 		if usercheck != true {
 			uidReplace(findS, replaceS, lines, newPasswd)
-			mountPasswd(id, username, imageUser, useruid, newPasswd)
+			mountPasswd(newPasswd)
 		}
 	}
 	return err
@@ -293,38 +325,27 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 }
 
 // mountPasswd bind mounts new passwd into container
-func mountPasswd(id string, username string, imageUser string, useruid string, newPasswd string) {
+func mountPasswd(newPasswd string) {
 	// modify the jsonFile2 directly... add /etc/passwd bind mount
-	//  containerNewMount := &containerJSON.MountPoints{
-	//		"/etc/passwd": {
-	//			"Source":      newPasswd,
-	//			"Destination": "/etc/passwd",
-	//			"RW":          true,
-	//			"Name":        "",
-	//			"Driver":      "",
-	//			"Relabel":     "Z",
-	//			"Propagation": "rprivate",
-	//			"Named":       	lse,
-	//			"ID":          "",
-	//		},
-	//	}
+	mount := MountPoints{
+		MountPoint{
+			Source:      newPasswd,
+			Destination: pfile,
+			RW:          true,
+			Name:        "",
+			Driver:      "",
+			Relabel:     "Z",
+			Propagation: "rprivate",
+			Named:       false,
+			ID:          "",
+		},
+	}
 
-	//	configFileName               = "config.v2.json"
-	// https://github.com/docker/docker/blob/v1.12.5/libcontainerd/client.go
-	// https://github.com/docker/docker/blob/v1.12.5/libcontainerd/client_linux.go
-	// https://github.com/docker/docker/blob/v1.12.5/libcontainerd/container.go
-	// https://github.com/docker/docker/tree/v1.12.5/libcontainerd
-	//func (ctr *container) spec() (*specs.Spec, error) {
-	//	dt, err := ioutil.ReadFile(filepath.Join(ctr.dir, configFilename))
-	//	if err != nil {
-	//		return nil, err
-	//	}
-	//	if err := json.Unmarshal(dt, &spec); err != nil {
-	//		return nil, err
-	//	}
-	//	return &spec, nil
-	//}
+	mountjson, _ := json.Marshal(mount)
+	// allm := append([]interface{}{containerJSON.MountPoints}, newmount)
+	// allm := append([]interface{}{containerJSON.MountPoints}, newmount)
+	// json.Unmarshal(allm, &MountPoints)
 
-	log.Printf("%s mount complete", pfile)
+	log.Printf("%s mount complete - %v", pfile, string(mountjson))
 	return
 }
