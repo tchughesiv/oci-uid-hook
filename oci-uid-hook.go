@@ -69,13 +69,12 @@ type State struct {
 // ContainerJSON is newly used struct along with MountPoint
 type ContainerJSON struct {
 	*types.ContainerJSONBase
-	Mount           MountPoint `json:"mountpoints"`
+	Mount           []MountPoint `json:"mountpoints"`
 	Config          *container.Config
 	NetworkSettings *types.NetworkSettings
 }
 
 // MountPoint represents a mount point configuration inside the container.
-// This is used for reporting the mountpoints in use by a container.
 type MountPoint struct {
 	Type        mount.Type `json:",omitempty"`
 	Source      string
@@ -89,6 +88,11 @@ type MountPoint struct {
 	ID          string
 }
 
+// t is for
+type t struct {
+	Mounts specs.Mount `json:"mounts"`
+}
+
 func main() {
 	os.Setenv("DOCKER_API_VERSION", dockerAPIversion)
 
@@ -98,7 +102,9 @@ func main() {
 	}
 
 	// config file settings
-	data, err := ioutil.ReadFile(config)
+	configf, err := os.Open(config)
+	checkErr(err)
+	data, err := ioutil.ReadAll(configf)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			log.Printf("UIDHook Failed to read %s %v", config, err.Error())
@@ -111,6 +117,9 @@ func main() {
 			return
 		}
 	}
+	if err := configf.Close(); err != nil {
+		log.Printf("UIDHook Failed %v", err.Error())
+	}
 
 	command := os.Args[1]
 	configFile := os.Args[2]
@@ -122,21 +131,29 @@ func main() {
 
 	newconfigFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 	// get additional container info
-	jsonFile, err := ioutil.ReadFile(configFile)
-	if err != nil {
-		log.Println(err)
+
+	jsonFile, err := os.Open(configFile)
+	checkErr(err)
+	jsonFileData, err := ioutil.ReadAll(jsonFile)
+	checkErr(err)
+	if err := jsonFile.Close(); err != nil {
+		log.Printf("UIDHook Failed %v", err.Error())
 	}
-	newjsonFile, err := ioutil.ReadFile(newconfigFile)
-	if err != nil {
-		log.Println(err)
+
+	newjsonFile, err := os.Open(newconfigFile)
+	checkErr(err)
+	newjsonFileData, err := ioutil.ReadAll(newjsonFile)
+	checkErr(err)
+	if err := newjsonFile.Close(); err != nil {
+		log.Printf("UIDHook Failed %v", err.Error())
 	}
-	json.Unmarshal(jsonFile, &containerJSON)
+	json.Unmarshal(jsonFileData, &containerJSON)
 	// 	log.Printf(string(jsonFile))
 
 	switch command {
 	case "prestart":
 		{
-			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFile, newjsonFile, configFile); err != nil {
+			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFileData, newjsonFileData, configFile, newconfigFile); err != nil {
 			}
 			return
 		}
@@ -149,17 +166,14 @@ func main() {
 }
 
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, newjsonFile []byte, configFile string) error {
+func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
 	cli, _ := client.NewEnvClient()
 
 	// retrieve image user
-	imageJSON, imageOUT, err := cli.ImageInspectWithRaw(ctx, image)
-	if err != nil {
-		log.Println(err)
-	}
-	_ = imageOUT
+	imageJSON, _, err := cli.ImageInspectWithRaw(ctx, image)
+	checkErr(err)
 	imageUser := imageJSON.Config.User
 	ugidresult := strings.Split(containerJSON.Config.User, ":")
 	user := ugidresult[0]
@@ -203,13 +217,15 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	// procPasswd := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
 	imageName := imageJSON.ID
 	fileRetrieve(imageName, newPasswd, cpath)
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 
 	pwFile, err := os.Open(newPasswd)
-	useruid := user
+	checkErr(err)
 	in, err := ioutil.ReadAll(pwFile)
+	if err := pwFile.Close(); err != nil {
+		log.Printf("UIDHook Failed %v", err.Error())
+	}
+	useruid := user
 	lines := strings.Split(string(in), "\n")
 	for i, line := range lines {
 		if strings.Contains(line, ":x:"+imageUser+":") {
@@ -229,7 +245,7 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	if username != "" {
 		if usercheck != true {
 			uidReplace(findS, replaceS, lines, newPasswd)
-			mountPasswd(newPasswd, jsonFile, newjsonFile, configFile)
+			mountPasswd(newPasswd, jsonFile, newjsonFile, configFile, newconfigFile)
 		}
 	}
 	return err
@@ -250,11 +266,10 @@ func fileRetrieve(imageName string, newPasswd string, cpath string) error {
 	if err != nil {
 		log.Println(err)
 	}
-	cfile, stat, err := cli.CopyFromContainer(ctx, tcuid.ID, pfile)
+	cfile, _, err := cli.CopyFromContainer(ctx, tcuid.ID, pfile)
 	if err != nil {
 		log.Println(err)
 	}
-	_ = stat
 	c, err := ioutil.ReadAll(cfile)
 	if err != nil {
 		log.Println(err)
@@ -288,9 +303,7 @@ func fileRetrieve(imageName string, newPasswd string, cpath string) error {
 // untar a tarball to a location
 func untar(tarball, target string) error {
 	reader, err := os.Open(tarball)
-	if err != nil {
-		return err
-	}
+	checkErr(err)
 	defer reader.Close()
 	tarReader := tar.NewReader(reader)
 
@@ -312,14 +325,10 @@ func untar(tarball, target string) error {
 		}
 
 		file, err := os.OpenFile(path, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode())
-		if err != nil {
-			return err
-		}
+		checkErr(err)
 		defer file.Close()
 		_, err = io.Copy(file, tarReader)
-		if err != nil {
-			return err
-		}
+		checkErr(err)
 	}
 	return nil
 }
@@ -344,9 +353,12 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 }
 
 // mountPasswd bind mounts new passwd into container
-func mountPasswd(newPasswd string, jsonFile []byte, newjsonFile []byte, configFile string) {
+func mountPasswd(newPasswd string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string) {
 	// modify the jsonFile2 directly... add /etc/passwd bind mount
-	mount2 := map[string]MountPoint{
+
+	// !!!!!!!!!!!!!!!
+	// config.v2.json configuration
+	mount := map[string]MountPoint{
 		pfile: MountPoint{
 			Source:      newPasswd,
 			Destination: pfile,
@@ -359,9 +371,31 @@ func mountPasswd(newPasswd string, jsonFile []byte, newjsonFile []byte, configFi
 			ID:          "",
 		},
 	}
-	pf2, _ := json.Marshal(mount2)
+
+	mount3 := MountPoint{
+		Source:      newPasswd,
+		Destination: pfile,
+		RW:          true,
+		Name:        "",
+		Driver:      "",
+		Relabel:     "Z",
+		Propagation: "rprivate",
+		Named:       false,
+		ID:          "",
+	}
+	pf, _ := json.Marshal(mount)
 	js, _ := simplejson.NewJson(jsonFile)
-	jsn, _ := simplejson.NewJson(pf2)
+	jsn, _ := simplejson.NewJson(pf)
+
+	// unmarshal method
+	json.Unmarshal(jsonFile, &containerJSON)
+	test := append(containerJSON.Mount, mount3)
+
+	// append new mountpoint to current ones
+	newfile := &containerJSON
+	newfile.Mount = test
+
+	cjsonfinal, _ := json.Marshal(newfile)
 
 	// current mountpoints mapping
 	jsnMPs := js.Get("MountPoints")
@@ -376,31 +410,49 @@ func mountPasswd(newPasswd string, jsonFile []byte, newjsonFile []byte, configFi
 	jsnMm["MountPoints"] = jsnMPm
 	jsonfinal, _ := json.Marshal(jsnMm)
 	// write new config file to disk
-	err := ioutil.WriteFile(configFile+"2", jsonfinal, 0666)
-	if err != nil {
-		log.Println(err)
-	}
-	err2 := ioutil.WriteFile(configFile, jsonfinal, 0666)
-	if err2 != nil {
-		log.Println(err2)
+
+	err := ioutil.WriteFile(configFile+".new", cjsonfinal, 0666)
+	checkErr(err)
+	err2 := ioutil.WriteFile(configFile+".new2", jsonfinal, 0666)
+	checkErr(err2)
+	err3 := ioutil.WriteFile(configFile+".orig", jsonFile, 0666)
+	checkErr(err3)
+
+	log.Printf("%v", string(cjsonfinal))
+	log.Printf("%v", configFile)
+
+	// !!!!!!!!!!!!!!!
+	// config.json configuration
+	mount2 := t{
+		Mounts: specs.Mount{
+			Destination: pfile,
+			Type:        "bind",
+			Source:      newPasswd,
+			Options:     []string{"rbind", "rprivate"},
+		},
 	}
 
-	log.Printf("%s mount complete", pfile)
-	log.Printf("new byte - %v %v", configFile+"2", configFile)
+	// unmarshal method
+	json.Unmarshal(newjsonFile, &spec)
+	test2 := append(spec.Mounts, mount2.Mounts)
+
+	// append new mountpoint to current ones
+	newfile2 := &spec
+	newfile2.Mounts = test2
+
+	cjsonfinal2, _ := json.Marshal(newfile2)
+
+	// write new config file to disk
+	cerr := ioutil.WriteFile(newconfigFile, cjsonfinal2, 0644)
+	checkErr(cerr)
+
+	log.Printf("%v", newconfigFile)
+	log.Printf("%s bind mount complete", pfile)
 	return
 }
 
-// AppendByte is good
-func AppendByte(slice []byte, data ...byte) []byte {
-	m := len(slice)
-	n := m + len(data)
-	if n > cap(slice) { // if necessary, reallocate
-		// allocate double what's needed, for future growth.
-		newSlice := make([]byte, (n+1)*2)
-		copy(newSlice, slice)
-		slice = newSlice
+func checkErr(err error) {
+	if err != nil {
+		log.Println(err)
 	}
-	slice = slice[0:n]
-	copy(slice[m:n], data)
-	return slice
 }
