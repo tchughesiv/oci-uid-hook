@@ -2,8 +2,11 @@
 
 package main
 
+import _ "github.com/opencontainers/runc/libcontainer/nsenter"
+
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,20 +15,23 @@ import (
 	"log"
 	"log/syslog"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
+	"testing"
 	"time"
 
-	simplejson "github.com/bitly/go-simplejson"
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
-	"github.com/docker/docker/client"
+	"github.com/docker/engine-api/client"
+	"github.com/docker/engine-api/types"
+	"github.com/docker/engine-api/types/container"
+	"github.com/opencontainers/runc/libcontainer"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tidwall/gjson"
-	"gopkg.in/yaml.v1"
+	"github.com/vishvananda/netlink/nl"
+	yaml "gopkg.in/yaml.v1"
 )
 
 const (
@@ -33,65 +39,23 @@ const (
 	dockerAPIversion = "1.24"                   // docker server api version
 	pfile            = "/etc/passwd"            // passwd path in container
 	ctxTimeout       = 10 * time.Second         // docker client timeout
+	mountinfoFormat  = "%d %d %d:%d %s %s %s %s"
 )
 
 var (
-	spec          specs.Spec
-	state         State
-	containerJSON ContainerJSON
+	state         specs.State
+	containerJSON types.ContainerJSON
 	check         string
 	username      string
 	usercheck     bool
 	mountcheck    bool
+	pwcheck       bool
 	//usergid string
 
 	settings struct {
 		Disabled bool `yaml:"disabled"`
 	}
 )
-
-// State holds information about the runtime state of the container.
-type State struct {
-	// Version is the version of the specification that is supported.
-	Version string `json:"ociVersion"`
-	// ID is the container ID
-	ID string `json:"id"`
-	// Status is the runtime status of the container.
-	Status string `json:"status"`
-	// Pid is the process ID for the container process.
-	Pid int `json:"pid"`
-	// Bundle is the path to the container's bundle directory.
-	BundlePath string `json:"bundlepath"`
-	// Annotations are key values associated with the container.
-	Annotations map[string]string `json:"annotations,omitempty"`
-}
-
-// ContainerJSON is newly used struct along with MountPoint
-type ContainerJSON struct {
-	*types.ContainerJSONBase
-	Mount           []MountPoint `json:"mountpoints"`
-	Config          *container.Config
-	NetworkSettings *types.NetworkSettings
-}
-
-// MountPoint represents a mount point configuration inside the container.
-type MountPoint struct {
-	Type        mount.Type `json:",omitempty"`
-	Source      string
-	Destination string
-	RW          bool
-	Name        string
-	Driver      string
-	Relabel     string
-	Propagation mount.Propagation
-	Named       bool
-	ID          string
-}
-
-// t is for
-type t struct {
-	Mounts specs.Mount `json:"mounts"`
-}
 
 func main() {
 	os.Setenv("DOCKER_API_VERSION", dockerAPIversion)
@@ -124,6 +88,7 @@ func main() {
 	command := os.Args[1]
 	configFile := os.Args[2]
 	cpath := path.Dir(configFile)
+	hostCFile := fmt.Sprintf("%s/hostconfig.json", cpath)
 
 	if err := json.NewDecoder(os.Stdin).Decode(&state); err != nil {
 		log.Printf("UIDHook Failed %v", err.Error())
@@ -153,7 +118,7 @@ func main() {
 	switch command {
 	case "prestart":
 		{
-			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFileData, newjsonFileData, configFile, newconfigFile); err != nil {
+			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFileData, newjsonFileData, configFile, newconfigFile, hostCFile); err != nil {
 			}
 			return
 		}
@@ -165,14 +130,20 @@ func main() {
 	log.Printf("Invalid command %q must be prestart|poststop", command)
 }
 
+func checkErr(err error) {
+	if err != nil {
+		log.Println(err)
+	}
+}
+
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string) error {
+func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string, hostCFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
 	cli, _ := client.NewEnvClient()
 
 	// retrieve image user
-	imageJSON, _, err := cli.ImageInspectWithRaw(ctx, image)
+	imageJSON, _, err := cli.ImageInspectWithRaw(ctx, image, false)
 	checkErr(err)
 	imageUser := imageJSON.Config.User
 	ugidresult := strings.Split(containerJSON.Config.User, ":")
@@ -204,6 +175,10 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 		return true // keep iterating
 	})
 
+	newPasswd := fmt.Sprintf("%s/passwd", cpath)
+	if _, err := os.Stat(newPasswd); err == nil {
+		pwcheck = true
+	}
 	// faster but less thorough?
 	// _, mountcheck := containerJSON.MountPoints[pfile]
 
@@ -212,9 +187,11 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 		return nil
 	}
 
+	// add check for passwd file later and logic
+	//if mountcheck != true {
+	//}
+
 	// retrieve passwd file from container
-	newPasswd := fmt.Sprintf("%s/passwd", cpath)
-	// procPasswd := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
 	imageName := imageJSON.ID
 	fileRetrieve(imageName, newPasswd, cpath)
 	checkErr(err)
@@ -245,7 +222,7 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	if username != "" {
 		if usercheck != true {
 			uidReplace(findS, replaceS, lines, newPasswd)
-			mountPasswd(newPasswd, jsonFile, newjsonFile, configFile, newconfigFile)
+			mountPasswd(id, newPasswd, jsonFile, newjsonFile, configFile, newconfigFile, hostCFile)
 		}
 	}
 	return err
@@ -262,40 +239,27 @@ func fileRetrieve(imageName string, newPasswd string, cpath string) error {
 		Entrypoint: []string{""},
 		Cmd:        []string{""},
 	}
+
 	tcuid, err := cli.ContainerCreate(ctx, containertmpConfig, nil, nil, "")
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 	cfile, _, err := cli.CopyFromContainer(ctx, tcuid.ID, pfile)
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 	c, err := ioutil.ReadAll(cfile)
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 	cfile.Close()
 	crm := cli.ContainerRemove(ctx, tcuid.ID, types.ContainerRemoveOptions{
 		//	RemoveVolumes: true,
 		Force: true,
 	})
-	if crm != nil {
-		log.Println(err)
-	}
+	checkErr(crm)
 
 	// create copy of passwd file in cpath
 	err = ioutil.WriteFile(newPasswd+".tar", c, 0644)
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 	err = untar(newPasswd+".tar", cpath)
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 	err = os.Remove(newPasswd + ".tar")
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 
 	return nil
 }
@@ -344,115 +308,96 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 	}
 	output := strings.Join(lines, "\n")
 	err := ioutil.WriteFile(newPasswd, []byte(output), 0644)
-	if err != nil {
-		log.Println(err)
-	}
+	checkErr(err)
 
 	log.Printf("passwd entry replaced w/ '%s' @ %s", check, newPasswd)
 	return
 }
 
 // mountPasswd bind mounts new passwd into container
-func mountPasswd(newPasswd string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string) {
-	// modify the jsonFile2 directly... add /etc/passwd bind mount
-
-	// !!!!!!!!!!!!!!!
-	// config.v2.json configuration
-	mount := map[string]MountPoint{
-		pfile: MountPoint{
-			Source:      newPasswd,
-			Destination: pfile,
-			RW:          true,
-			Name:        "",
-			Driver:      "",
-			Relabel:     "Z",
-			Propagation: "rprivate",
-			Named:       false,
-			ID:          "",
-		},
-	}
-
-	mount3 := MountPoint{
-		Source:      newPasswd,
-		Destination: pfile,
-		RW:          true,
-		Name:        "",
-		Driver:      "",
-		Relabel:     "Z",
-		Propagation: "rprivate",
-		Named:       false,
-		ID:          "",
-	}
-	pf, _ := json.Marshal(mount)
-	js, _ := simplejson.NewJson(jsonFile)
-	jsn, _ := simplejson.NewJson(pf)
-
-	// unmarshal method
-	json.Unmarshal(jsonFile, &containerJSON)
-	test := append(containerJSON.Mount, mount3)
-
-	// append new mountpoint to current ones
-	newfile := &containerJSON
-	newfile.Mount = test
-
-	cjsonfinal, _ := json.Marshal(newfile)
-
-	// current mountpoints mapping
-	jsnMPs := js.Get("MountPoints")
-	jsnMPm, _ := jsnMPs.Map()
-	// new /etc/passwd bind mount mapping
-	jsnm, _ := jsn.Map()
-	// append new mountpoint to current ones
-	jsnMPm[pfile] = jsnm[pfile]
-	// current full config.v2.json mapping
-	jsnMm, _ := js.Map()
-	// append new combined mountpoints mapping to overall config
-	jsnMm["MountPoints"] = jsnMPm
-	jsonfinal, _ := json.Marshal(jsnMm)
-	// write new config file to disk
-
-	err := ioutil.WriteFile(configFile+".new", cjsonfinal, 0666)
-	checkErr(err)
-	err2 := ioutil.WriteFile(configFile+".new2", jsonfinal, 0666)
-	checkErr(err2)
-	err3 := ioutil.WriteFile(configFile+".orig", jsonFile, 0666)
-	checkErr(err3)
-
-	log.Printf("%v", string(cjsonfinal))
-	log.Printf("%v", configFile)
-
-	// !!!!!!!!!!!!!!!
-	// config.json configuration
-	mount2 := t{
-		Mounts: specs.Mount{
-			Destination: pfile,
-			Type:        "bind",
-			Source:      newPasswd,
-			Options:     []string{"rbind", "rprivate"},
-		},
-	}
-
-	// unmarshal method
-	json.Unmarshal(newjsonFile, &spec)
-	test2 := append(spec.Mounts, mount2.Mounts)
-
-	// append new mountpoint to current ones
-	newfile2 := &spec
-	newfile2.Mounts = test2
-
-	cjsonfinal2, _ := json.Marshal(newfile2)
-
-	// write new config file to disk
-	cerr := ioutil.WriteFile(newconfigFile, cjsonfinal2, 0644)
-	checkErr(cerr)
-
-	log.Printf("%v", newconfigFile)
-	log.Printf("%s bind mount complete", pfile)
+func mountPasswd(id string, newPasswd string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string, hostCFile string) {
+	//sPid := C.int(state.Pid)
+	//mntTest := C.enter_namespace(sPid)
+	//mntTests := C.GoString(mntTest)
+	//log.Printf(mntTests)
 	return
 }
 
-func checkErr(err error) {
+type pid struct {
+	Pid int `json:"Pid"`
+}
+
+// TestNsenterValidPaths is good
+func TestNsenterValidPaths(t *testing.T) {
+	args := []string{"nsenter-exec"}
+	parent, child, err := newPipe()
 	if err != nil {
-		log.Println(err)
+		t.Fatalf("failed to create pipe %v", err)
 	}
+
+	namespaces := []string{
+		// join pid ns of the current process
+		fmt.Sprintf("pid:/proc/%d/ns/pid", os.Getpid()),
+	}
+	cmd := &exec.Cmd{
+		Path:       os.Args[0],
+		Args:       args,
+		ExtraFiles: []*os.File{child},
+		Env:        []string{"_LIBCONTAINER_INITPIPE=3"},
+		Stdout:     os.Stdout,
+		Stderr:     os.Stderr,
+	}
+
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("nsenter failed to start %v", err)
+	}
+	// write cloneFlags
+	r := nl.NewNetlinkRequest(int(libcontainer.InitMsg), 0)
+	r.AddData(&libcontainer.Int32msg{
+		Type:  libcontainer.CloneFlagsAttr,
+		Value: uint32(syscall.CLONE_NEWNET),
+	})
+	r.AddData(&libcontainer.Bytemsg{
+		Type:  libcontainer.NsPathsAttr,
+		Value: []byte(strings.Join(namespaces, ",")),
+	})
+	if _, err := io.Copy(parent, bytes.NewReader(r.Serialize())); err != nil {
+		t.Fatal(err)
+	}
+
+	decoder := json.NewDecoder(parent)
+	var pid *pid
+
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("nsenter exits with a non-zero exit status")
+	}
+	if err := decoder.Decode(&pid); err != nil {
+		dir, _ := ioutil.ReadDir(fmt.Sprintf("/proc/%d/ns", os.Getpid()))
+		for _, d := range dir {
+			t.Log(d.Name())
+		}
+		t.Fatalf("%v", err)
+	}
+
+	p, err := os.FindProcess(pid.Pid)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	p.Wait()
+}
+
+func init() {
+	if strings.HasPrefix(os.Args[0], "nsenter-") {
+		os.Exit(0)
+	}
+	return
+}
+
+func newPipe() (parent *os.File, child *os.File, err error) {
+	fds, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return os.NewFile(uintptr(fds[1]), "parent"), os.NewFile(uintptr(fds[0]), "child"), nil
 }
