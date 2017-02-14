@@ -42,7 +42,7 @@ rpm: dist
 #
 # Example:
 #   make install
-install: oci-uid-hook oci-uid-hook.1
+install: 
 	install -d -m 755 $(HOOKSINSTALLDIR)
 	install -m 755 oci-uid-hook $(HOOKSINSTALLDIR)
 	install -d -m 755 $(PREFIX)/share/man/man1

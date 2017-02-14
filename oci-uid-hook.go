@@ -2,11 +2,15 @@
 
 package main
 
-import _ "github.com/opencontainers/runc/libcontainer/nsenter"
+// example container runtime - this will trigger the hook
+//    docker run -du 10001 tomaskral/nonroot-nginx
+// these would NOT the hook
+//    docker run -du root tomaskral/nonroot-nginx
+//    docker run -du 0 tomaskral/nonroot-nginx
+//    docker run -du 10001 -v /etc/passwd:/etc/passwd:Z tomaskral/nonroot-nginx
 
 import (
 	"archive/tar"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,31 +19,25 @@ import (
 	"log"
 	"log/syslog"
 	"os"
-	"os/exec"
 	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
-	"testing"
 	"time"
 
 	"github.com/docker/engine-api/client"
 	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/container"
-	"github.com/opencontainers/runc/libcontainer"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tidwall/gjson"
-	"github.com/vishvananda/netlink/nl"
 	yaml "gopkg.in/yaml.v1"
 )
 
 const (
-	config           = "/etc/oci-uid-hook.conf" // Config file for disabling hook
 	dockerAPIversion = "1.24"                   // docker server api version
+	config           = "/etc/oci-uid-hook.conf" // Config file for disabling hook
 	pfile            = "/etc/passwd"            // passwd path in container
 	ctxTimeout       = 10 * time.Second         // docker client timeout
-	mountinfoFormat  = "%d %d %d:%d %s %s %s %s"
 )
 
 var (
@@ -56,6 +54,12 @@ var (
 		Disabled bool `yaml:"disabled"`
 	}
 )
+
+func checkErr(err error) {
+	if err != nil {
+		log.Println(err)
+	}
+}
 
 func main() {
 	os.Setenv("DOCKER_API_VERSION", dockerAPIversion)
@@ -88,28 +92,17 @@ func main() {
 	command := os.Args[1]
 	configFile := os.Args[2]
 	cpath := path.Dir(configFile)
-	hostCFile := fmt.Sprintf("%s/hostconfig.json", cpath)
 
 	if err := json.NewDecoder(os.Stdin).Decode(&state); err != nil {
 		log.Printf("UIDHook Failed %v", err.Error())
 	}
 
-	newconfigFile := fmt.Sprintf("%s/config.json", state.BundlePath)
 	// get additional container info
-
 	jsonFile, err := os.Open(configFile)
 	checkErr(err)
 	jsonFileData, err := ioutil.ReadAll(jsonFile)
 	checkErr(err)
 	if err := jsonFile.Close(); err != nil {
-		log.Printf("UIDHook Failed %v", err.Error())
-	}
-
-	newjsonFile, err := os.Open(newconfigFile)
-	checkErr(err)
-	newjsonFileData, err := ioutil.ReadAll(newjsonFile)
-	checkErr(err)
-	if err := newjsonFile.Close(); err != nil {
 		log.Printf("UIDHook Failed %v", err.Error())
 	}
 	json.Unmarshal(jsonFileData, &containerJSON)
@@ -118,8 +111,7 @@ func main() {
 	switch command {
 	case "prestart":
 		{
-			if err = UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFileData, newjsonFileData, configFile, newconfigFile, hostCFile); err != nil {
-			}
+			UIDHook(command, containerJSON.Config.Image, state.ID, cpath, jsonFileData, configFile)
 			return
 		}
 	case "poststop":
@@ -130,14 +122,8 @@ func main() {
 	log.Printf("Invalid command %q must be prestart|poststop", command)
 }
 
-func checkErr(err error) {
-	if err != nil {
-		log.Println(err)
-	}
-}
-
 // UIDHook for username recognition w/ arbitrary uid in the container
-func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string, hostCFile string) error {
+func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, configFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
 	cli, _ := client.NewEnvClient()
@@ -154,15 +140,18 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 		return nil
 	}
 
+	// hook won't trigger if a user isn't specified in the image, so root assigned.
+	// Should we assume root as below? what about scratch images? add logic there?
+	if imageUser == "" {
+		imageUser = "0"
+	}
 	// check if user is an integer
 	if _, err := strconv.Atoi(user); err != nil {
 		return nil
 	}
-
 	log.Printf("%s %s", command, state.ID)
 
 	// check for existing /etc/passwd bind mount... bypass if exists.
-	// more iterative approach below... better?
 	pwMount := gjson.GetBytes(jsonFile, "MountPoints")
 	pwMount.ForEach(func(key, value gjson.Result) bool {
 		pwMountDest := gjson.Get(value.String(), "Destination")
@@ -179,7 +168,7 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	if _, err := os.Stat(newPasswd); err == nil {
 		pwcheck = true
 	}
-	// faster but less thorough?
+	// faster approach but less thorough?
 	// _, mountcheck := containerJSON.MountPoints[pfile]
 
 	if mountcheck == true {
@@ -221,8 +210,8 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 	// ensure specified uid doesn't already match an image username
 	if username != "" {
 		if usercheck != true {
-			uidReplace(findS, replaceS, lines, newPasswd)
-			mountPasswd(id, newPasswd, jsonFile, newjsonFile, configFile, newconfigFile, hostCFile)
+			output := uidReplace(findS, replaceS, lines, newPasswd)
+			mountPasswd(id, newPasswd, jsonFile, configFile, output)
 		}
 	}
 	return err
@@ -298,7 +287,7 @@ func untar(tarball, target string) error {
 }
 
 // uidReplace replaces image uid w/ specified uid in new passwd file
-func uidReplace(findS string, replaceS string, lines []string, newPasswd string) {
+func uidReplace(findS string, replaceS string, lines []string, newPasswd string) string {
 	// find/replace w/ new uid
 	for i, line := range lines {
 		if strings.Contains(line, findS) {
@@ -311,93 +300,43 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 	checkErr(err)
 
 	log.Printf("passwd entry replaced w/ '%s' @ %s", check, newPasswd)
-	return
+	return output
 }
 
 // mountPasswd bind mounts new passwd into container
-func mountPasswd(id string, newPasswd string, jsonFile []byte, newjsonFile []byte, configFile string, newconfigFile string, hostCFile string) {
-	//sPid := C.int(state.Pid)
-	//mntTest := C.enter_namespace(sPid)
-	//mntTests := C.GoString(mntTest)
-	//log.Printf(mntTests)
-	return
-}
+func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string, output string) error {
+	// likely need to join ns and bind mount directly
+	// testing
+	ProcS := fmt.Sprintf("/proc/%d", state.Pid)
+	MntNsFd := fmt.Sprintf("%s/ns/mnt", ProcS)
+	MntNsPath := path.Join(ProcS, "/root")
+	_ = MntNsFd
+	_ = MntNsPath
 
-type pid struct {
-	Pid int `json:"Pid"`
-}
+	//	fd, err := syscall.Open(MntNsPath, 308, 0)
+	//	if err != nil {
+	//		log.Printf("Could not enter Mount namespace: %s", err)
+	//	}
+	//	syscall.Close(fd)
 
-// TestNsenterValidPaths is good
-func TestNsenterValidPaths(t *testing.T) {
-	args := []string{"nsenter-exec"}
-	parent, child, err := newPipe()
-	if err != nil {
-		t.Fatalf("failed to create pipe %v", err)
-	}
+	//serr2 := system.Setns(fd)
+	//checkErr(serr2)
 
-	namespaces := []string{
-		// join pid ns of the current process
-		fmt.Sprintf("pid:/proc/%d/ns/pid", os.Getpid()),
-	}
-	cmd := &exec.Cmd{
-		Path:       os.Args[0],
-		Args:       args,
-		ExtraFiles: []*os.File{child},
-		Env:        []string{"_LIBCONTAINER_INITPIPE=3"},
-		Stdout:     os.Stdout,
-		Stderr:     os.Stderr,
-	}
+	// cpath := path.Dir(configFile)
+	// rl, err := filepath.Abs(cpath)
+	// checkErr(err)
 
-	if err := cmd.Start(); err != nil {
-		t.Fatalf("nsenter failed to start %v", err)
-	}
-	// write cloneFlags
-	r := nl.NewNetlinkRequest(int(libcontainer.InitMsg), 0)
-	r.AddData(&libcontainer.Int32msg{
-		Type:  libcontainer.CloneFlagsAttr,
-		Value: uint32(syscall.CLONE_NEWNET),
-	})
-	r.AddData(&libcontainer.Bytemsg{
-		Type:  libcontainer.NsPathsAttr,
-		Value: []byte(strings.Join(namespaces, ",")),
-	})
-	if _, err := io.Copy(parent, bytes.NewReader(r.Serialize())); err != nil {
-		t.Fatal(err)
-	}
+	// log.Printf(rl)
+	// log.Printf(ProcS)
 
-	decoder := json.NewDecoder(parent)
-	var pid *pid
+	// writing out passwd file directly to proc space won't work... overwritten once container starts... not ideal anyway.
+	errm := ioutil.WriteFile(MntNsPath+"/etc/passwd", []byte(output), 0644)
+	checkErr(errm)
 
-	if err := cmd.Wait(); err != nil {
-		t.Fatalf("nsenter exits with a non-zero exit status")
-	}
-	if err := decoder.Decode(&pid); err != nil {
-		dir, _ := ioutil.ReadDir(fmt.Sprintf("/proc/%d/ns", os.Getpid()))
-		for _, d := range dir {
-			t.Log(d.Name())
-		}
-		t.Fatalf("%v", err)
-	}
-
-	p, err := os.FindProcess(pid.Pid)
-	if err != nil {
-		t.Fatalf("%v", err)
-	}
-	p.Wait()
-}
-
-func init() {
-	if strings.HasPrefix(os.Args[0], "nsenter-") {
-		os.Exit(0)
-	}
-	return
-}
-
-func newPipe() (parent *os.File, child *os.File, err error) {
-	fds, err := syscall.Socketpair(syscall.AF_LOCAL, syscall.SOCK_STREAM|syscall.SOCK_CLOEXEC, 0)
-	if err != nil {
-		return nil, nil, err
-	}
-
-	return os.NewFile(uintptr(fds[1]), "parent"), os.NewFile(uintptr(fds[0]), "child"), nil
+	log.Printf("To test uid-hook manually, execute these in order -")
+	log.Printf("   $ docker exec %s id", state.ID)
+	log.Printf("   $ cp -p %s %s/etc/passwd", newPasswd, MntNsPath)
+	log.Printf("   $ docker exec %s id", state.ID)
+	log.Printf("   $ docker exec %s ps -f", state.ID)
+	return nil
 }
