@@ -1,10 +1,10 @@
 // +build linux
 // example container runtime - this will trigger the hook
 //    docker run -du 10001 tomaskral/nonroot-nginx
-// these would NOT the hook
+// these would NOT trigger the hook
 //    docker run -du root tomaskral/nonroot-nginx
 //    docker run -du 0 tomaskral/nonroot-nginx
-//    docker run -du 10001 -v /etc/passwd:/etc/passwd:Z tomaskral/nonroot-nginx
+//    docker run -du 10001 -v /tmp/passwd:/etc/passwd:Z tomaskral/nonroot-nginx
 
 package main
 
