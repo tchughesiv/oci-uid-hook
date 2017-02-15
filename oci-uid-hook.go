@@ -309,7 +309,7 @@ func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string
 	// likely need to join ns and bind mount directly
 	// testing
 	ProcNS := fmt.Sprintf("/proc/%d/ns", state.Pid)
-	ProcPW := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
+	ProcPW := fmt.Sprintf("/proc/%d/etc/passwd", state.Pid)
 
 	namespaces := []string{"ipc", "uts", "net", "pid", "mnt"}
 	for i := range namespaces {
