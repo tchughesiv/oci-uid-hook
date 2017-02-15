@@ -1,13 +1,12 @@
 // +build linux
-
-package main
-
 // example container runtime - this will trigger the hook
 //    docker run -du 10001 tomaskral/nonroot-nginx
 // these would NOT the hook
 //    docker run -du root tomaskral/nonroot-nginx
 //    docker run -du 0 tomaskral/nonroot-nginx
 //    docker run -du 10001 -v /etc/passwd:/etc/passwd:Z tomaskral/nonroot-nginx
+
+package main
 
 import (
 	"archive/tar"
@@ -23,11 +22,13 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/docker/engine-api/client"
 	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/container"
+	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tidwall/gjson"
 	yaml "gopkg.in/yaml.v1"
@@ -307,35 +308,29 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string, output string) error {
 	// likely need to join ns and bind mount directly
 	// testing
-	ProcS := fmt.Sprintf("/proc/%d", state.Pid)
-	MntNsFd := fmt.Sprintf("%s/ns/mnt", ProcS)
-	MntNsPath := path.Join(ProcS, "/root")
-	_ = MntNsFd
-	_ = MntNsPath
+	ProcNS := fmt.Sprintf("/proc/%d/ns", state.Pid)
+	ProcPW := fmt.Sprintf("/proc/%d/root/etc/passwd", state.Pid)
 
-	//	fd, err := syscall.Open(MntNsPath, 308, 0)
-	//	if err != nil {
-	//		log.Printf("Could not enter Mount namespace: %s", err)
-	//	}
-	//	syscall.Close(fd)
+	namespaces := []string{"ipc", "uts", "net", "pid", "mnt"}
+	for i := range namespaces {
+		fd, _ := syscall.Open(filepath.Join(ProcNS, namespaces[i]), syscall.O_RDONLY, 0644)
+		err, _, msg := syscall.RawSyscall(308, uintptr(fd), 0, 0) // 308 == setns
+		if err != 0 {
+			log.Println("setns on", namespaces[i], "namespace failed:", msg)
+		} else {
+			log.Println("setns on", namespaces[i], "namespace succeeded")
+		}
 
-	//serr2 := system.Setns(fd)
-	//checkErr(serr2)
+	}
 
-	// cpath := path.Dir(configFile)
-	// rl, err := filepath.Abs(cpath)
+	// factory, err := libcontainer.New("")
+	// Container, err := factory.Load(state.ID)
 	// checkErr(err)
-
-	// log.Printf(rl)
-	// log.Printf(ProcS)
-
-	// writing out passwd file directly to proc space won't work... overwritten once container starts... not ideal anyway.
-	errm := ioutil.WriteFile(MntNsPath+"/etc/passwd", []byte(output), 0644)
-	checkErr(errm)
-
+	// test := Container.ID()
+	// test := os.Getenv("_LIBCONTAINER_INITPIPE")
 	log.Printf("To test uid-hook manually, execute these in order -")
 	log.Printf("   $ docker exec %s id", state.ID)
-	log.Printf("   $ cp -p %s %s/etc/passwd", newPasswd, MntNsPath)
+	log.Printf("   $ cp -p %s %s", newPasswd, ProcPW)
 	log.Printf("   $ docker exec %s id", state.ID)
 	log.Printf("   $ docker exec %s ps -f", state.ID)
 	return nil

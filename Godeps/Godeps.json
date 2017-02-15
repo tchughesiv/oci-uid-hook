@@ -114,6 +114,11 @@
 			"Rev": "0dadbb0345b35ec7ef35e228dabb8de89a65bf52"
 		},
 		{
+			"ImportPath": "github.com/opencontainers/runc/libcontainer/nsenter",
+			"Comment": "v1.0.0-rc2-275-g4f21aea",
+			"Rev": "4f21aea40d060d0171b1c94861f2f63f4a6029d0"
+		},
+		{
 			"ImportPath": "github.com/opencontainers/runtime-spec/specs-go",
 			"Comment": "v1.0.0-rc2",
 			"Rev": "7dab1a245d3e13d0ad03b77409d0bf7e00a6ada4"
