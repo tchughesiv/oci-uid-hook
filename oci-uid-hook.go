@@ -233,13 +233,17 @@ func fileRetrieve(imageName string, newPasswd string, cpath string) error {
 	tcuid, err := cli.ContainerCreate(ctx, containertmpConfig, nil, nil, "")
 	checkErr(err)
 	cfile, _, err := cli.CopyFromContainer(ctx, tcuid.ID, pfile)
-	checkErr(err)
+	if err != nil {
+		cfile.Close()
+		log.Println(err)
+		return nil
+	}
 	c, err := ioutil.ReadAll(cfile)
 	checkErr(err)
 	cfile.Close()
 	crm := cli.ContainerRemove(ctx, tcuid.ID, types.ContainerRemoveOptions{
-		//	RemoveVolumes: true,
-		Force: true,
+		RemoveVolumes: true,
+		Force:         true,
 	})
 	checkErr(crm)
 
@@ -297,8 +301,11 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 		}
 	}
 	output := strings.Join(lines, "\n")
-	err := ioutil.WriteFile(newPasswd, []byte(output), 0644)
+	err := ioutil.WriteFile(newPasswd, []byte(output), 0400)
 	checkErr(err)
+	// Use 400 perms on host for added security of passwd file? Bind mount in at 644?
+	err2 := os.Chmod(newPasswd, 0400)
+	checkErr(err2)
 
 	log.Printf("passwd entry replaced w/ '%s' @ %s", check, newPasswd)
 	return output
