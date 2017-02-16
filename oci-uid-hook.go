@@ -1,12 +1,13 @@
 // +build linux
+
+package main
+
 // example container runtime - this will trigger the hook
 //    docker run -du 10001 tomaskral/nonroot-nginx
 // these would NOT trigger the hook
-//    docker run -du root tomaskral/nonroot-nginx
-//    docker run -du 0 tomaskral/nonroot-nginx
+//    docker run -du nginx tomaskral/nonroot-nginx
+//    docker run -du 997 tomaskral/nonroot-nginx
 //    docker run -du 10001 -v /tmp/passwd:/etc/passwd:Z tomaskral/nonroot-nginx
-
-package main
 
 import (
 	"archive/tar"
@@ -28,7 +29,6 @@ import (
 	"github.com/docker/engine-api/client"
 	"github.com/docker/engine-api/types"
 	"github.com/docker/engine-api/types/container"
-	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tidwall/gjson"
 	yaml "gopkg.in/yaml.v1"
@@ -307,11 +307,11 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 // mountPasswd bind mounts new passwd into container
 func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string, output string) error {
 	// likely need to join ns and bind mount directly
-	// testing
+	ProcSpace := fmt.Sprintf("/proc/%d/root", state.Pid)
 	ProcNS := fmt.Sprintf("/proc/%d/ns", state.Pid)
-	ProcPW := fmt.Sprintf("/proc/%d/etc/passwd", state.Pid)
+	ProcPW := fmt.Sprintf(ProcSpace + "/etc/passwd")
 
-	namespaces := []string{"ipc", "uts", "net", "pid", "mnt"}
+	namespaces := []string{"ipc", "uts", "mnt", "net", "pid"}
 	for i := range namespaces {
 		fd, _ := syscall.Open(filepath.Join(ProcNS, namespaces[i]), syscall.O_RDONLY, 0644)
 		err, _, msg := syscall.RawSyscall(308, uintptr(fd), 0, 0) // 308 == setns
@@ -320,18 +320,11 @@ func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string
 		} else {
 			log.Println("setns on", namespaces[i], "namespace succeeded")
 		}
-
+		syscall.Close(fd)
 	}
 
-	// factory, err := libcontainer.New("")
-	// Container, err := factory.Load(state.ID)
-	// checkErr(err)
-	// test := Container.ID()
-	// test := os.Getenv("_LIBCONTAINER_INITPIPE")
-	log.Printf("To test uid-hook manually, execute these in order -")
-	log.Printf("   $ docker exec %s id", state.ID)
-	log.Printf("   $ cp -p %s %s", newPasswd, ProcPW)
-	log.Printf("   $ docker exec %s id", state.ID)
-	log.Printf("   $ docker exec %s ps -f", state.ID)
+	log.Printf("Here are the files pre bind mount -")
+	log.Printf("   %s", newPasswd)
+	log.Printf("   %s", ProcPW)
 	return nil
 }

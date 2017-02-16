@@ -10,8 +10,8 @@
 		},
 		{
 			"ImportPath": "github.com/Sirupsen/logrus",
-			"Comment": "v0.11.2-1-g3f603f4",
-			"Rev": "3f603f494d61c73457fb234161d8982b9f0f0b71"
+			"Comment": "v0.11.2-6-g7f4b1ad",
+			"Rev": "7f4b1adc791766938c29457bed0703fb9134421a"
 		},
 		{
 			"ImportPath": "github.com/docker/distribution/digest",
@@ -114,11 +114,6 @@
 			"Rev": "0dadbb0345b35ec7ef35e228dabb8de89a65bf52"
 		},
 		{
-			"ImportPath": "github.com/opencontainers/runc/libcontainer/nsenter",
-			"Comment": "v1.0.0-rc2-275-g4f21aea",
-			"Rev": "4f21aea40d060d0171b1c94861f2f63f4a6029d0"
-		},
-		{
 			"ImportPath": "github.com/opencontainers/runtime-spec/specs-go",
 			"Comment": "v1.0.0-rc2",
 			"Rev": "7dab1a245d3e13d0ad03b77409d0bf7e00a6ada4"
@@ -133,19 +128,19 @@
 		},
 		{
 			"ImportPath": "golang.org/x/net/context",
-			"Rev": "236b8f043b920452504e263bc21d354427127473"
+			"Rev": "b4690f45fa1cafc47b1c280c2e75116efe40cc13"
 		},
 		{
 			"ImportPath": "golang.org/x/net/proxy",
-			"Rev": "236b8f043b920452504e263bc21d354427127473"
+			"Rev": "b4690f45fa1cafc47b1c280c2e75116efe40cc13"
 		},
 		{
 			"ImportPath": "golang.org/x/sys/unix",
-			"Rev": "7a6e5648d140666db5d920909e082ca00a87ba2c"
+			"Rev": "e24f485414aeafb646f6fca458b0bf869c0880a1"
 		},
 		{
 			"ImportPath": "golang.org/x/sys/windows",
-			"Rev": "7a6e5648d140666db5d920909e082ca00a87ba2c"
+			"Rev": "e24f485414aeafb646f6fca458b0bf869c0880a1"
 		},
 		{
 			"ImportPath": "gopkg.in/yaml.v1",
