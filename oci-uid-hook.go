@@ -26,9 +26,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/docker/engine-api/client"
-	"github.com/docker/engine-api/types"
-	"github.com/docker/engine-api/types/container"
+	dockerclient "github.com/docker/engine-api/client"
+	dockertypes "github.com/docker/engine-api/types"
+	dockercontainer "github.com/docker/engine-api/types/container"
+	_ "github.com/opencontainers/runc/libcontainer/nsenter"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/tidwall/gjson"
 	yaml "gopkg.in/yaml.v1"
@@ -43,7 +44,7 @@ const (
 
 var (
 	state         specs.State
-	containerJSON types.ContainerJSON
+	containerJSON dockertypes.ContainerJSON
 	check         string
 	username      string
 	usercheck     bool
@@ -64,6 +65,11 @@ func checkErr(err error) {
 
 func main() {
 	os.Setenv("DOCKER_API_VERSION", dockerAPIversion)
+
+	if syscall.Geteuid() != 0 {
+		fmt.Println("abort: you want to run this as root")
+		os.Exit(1)
+	}
 
 	logwriter, err := syslog.New(syslog.LOG_NOTICE, "oci-uid-hook")
 	if err == nil {
@@ -127,7 +133,7 @@ func main() {
 func UIDHook(command string, image string, id string, cpath string, jsonFile []byte, configFile string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
-	cli, _ := client.NewEnvClient()
+	cli, _ := dockerclient.NewEnvClient()
 
 	// retrieve image user
 	imageJSON, _, err := cli.ImageInspectWithRaw(ctx, image, false)
@@ -222,9 +228,9 @@ func UIDHook(command string, image string, id string, cpath string, jsonFile []b
 func fileRetrieve(imageName string, newPasswd string, cpath string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), ctxTimeout)
 	defer cancel()
-	cli, _ := client.NewEnvClient()
+	cli, _ := dockerclient.NewEnvClient()
 
-	containertmpConfig := &container.Config{
+	containertmpConfig := &dockercontainer.Config{
 		Image:      imageName,
 		Entrypoint: []string{""},
 		Cmd:        []string{""},
@@ -234,12 +240,17 @@ func fileRetrieve(imageName string, newPasswd string, cpath string) error {
 	checkErr(err)
 	cfile, _, err := cli.CopyFromContainer(ctx, tcuid.ID, pfile)
 	checkErr(err)
+	// if passwd file doesn't exist (e.g. scratch image), improve error handling
 	c, err := ioutil.ReadAll(cfile)
-	checkErr(err)
+	if err != nil {
+		cfile.Close()
+		log.Println(err)
+		return nil
+	}
 	cfile.Close()
-	crm := cli.ContainerRemove(ctx, tcuid.ID, types.ContainerRemoveOptions{
-		//	RemoveVolumes: true,
-		Force: true,
+	crm := cli.ContainerRemove(ctx, tcuid.ID, dockertypes.ContainerRemoveOptions{
+		RemoveVolumes: true,
+		Force:         true,
 	})
 	checkErr(crm)
 
@@ -297,8 +308,11 @@ func uidReplace(findS string, replaceS string, lines []string, newPasswd string)
 		}
 	}
 	output := strings.Join(lines, "\n")
-	err := ioutil.WriteFile(newPasswd, []byte(output), 0644)
+	err := ioutil.WriteFile(newPasswd, []byte(output), 0400)
 	checkErr(err)
+	// Use 400 perms on host for added security of passwd file? Bind mount in at 644?
+	err2 := os.Chmod(newPasswd, 0400)
+	checkErr(err2)
 
 	log.Printf("passwd entry replaced w/ '%s' @ %s", check, newPasswd)
 	return output
@@ -309,7 +323,12 @@ func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string
 	// likely need to join ns and bind mount directly
 	ProcSpace := fmt.Sprintf("/proc/%d/root", state.Pid)
 	ProcNS := fmt.Sprintf("/proc/%d/ns", state.Pid)
+	//ProcNSmnt := fmt.Sprintf("/proc/%d/ns/mnt", state.Pid)
 	ProcPW := fmt.Sprintf(ProcSpace + "/etc/passwd")
+
+	// will use to compare w/ ns before executing anything (e.g. being mount). difference ensures have entered namespace
+	nsCheck, err := os.Readlink("/proc/self/ns/mnt")
+	checkErr(err)
 
 	namespaces := []string{"ipc", "uts", "mnt", "net", "pid"}
 	for i := range namespaces {
@@ -323,8 +342,10 @@ func mountPasswd(id string, newPasswd string, jsonFile []byte, configFile string
 		syscall.Close(fd)
 	}
 
+	log.Printf(nsCheck)
 	log.Printf("Here are the files pre bind mount -")
 	log.Printf("   %s", newPasswd)
 	log.Printf("   %s", ProcPW)
+
 	return nil
 }
