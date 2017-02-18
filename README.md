@@ -30,3 +30,16 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
 "docker Version": 1.12.5
 "runc version": 1.0.0-rc2
 ```
+
+To build, install, clean-up:
+
+First, clone this branch, then:
+### 
+```shell
+git clone https://github.com/tchughesiv/oci-uid-hook
+cd oci-uid-hook
+autoreconf -i
+./configure --libexecdir=/usr/libexec/oci/hooks.d
+make
+make install
+```

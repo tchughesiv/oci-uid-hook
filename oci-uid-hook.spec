@@ -22,6 +22,7 @@ BuildRequires:  automake
 BuildRequires:  pkgconfig(yajl)
 BuildRequires:  pkgconfig(libselinux)
 BuildRequires:  pkgconfig(mount)
+BuildRequires:  pkgconfig(libcurl)
 BuildRequires:  golang-github-cpuguy83-go-md2man
 
 %description
