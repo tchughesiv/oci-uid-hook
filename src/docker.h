@@ -5,7 +5,7 @@
 #ifndef DOCKER_DOCKER_H
 #define DOCKER_DOCKER_H
 
-#define DOCKER_API_VERSION "v1.24"
+#define DOCKER_API_VERSION v1.24
 
 #include <stdlib.h>
 #include <string.h>

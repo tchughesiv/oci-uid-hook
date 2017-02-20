@@ -19,3 +19,4 @@ config.h
 config.h.in
 stamp-*
 *.gz
+notes

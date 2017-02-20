@@ -1,7 +1,5 @@
 libexec_PROGRAMS = oci-uid-hook
-oci_uid_hook_SOURCES= src/uidhook.c
-## need curl 7.40 or greater for this to work
-#oci_uid_hook_SOURCES= src/uidhook.c src/docker.c
+oci_uid_hook_SOURCES= src/uidhook.c src/docker.c
 
 oci_uid_hook_CFLAGS = -Wall -Wextra -std=c99 $(YAJL_CFLAGS)
 oci_uid_hook_LDADD = $(YAJL_LIBS)

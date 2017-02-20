@@ -19,7 +19,6 @@
 #include <yajl/yajl_tree.h>
 #include <libmount/libmount.h>
 
-#include "docker.h"
 #include "config.h"
 
 #define DOCKER_CONTAINER "docker"
@@ -297,7 +296,9 @@ static int prestart(const char *rootfs,
 		int pid,
 		const char *mount_label,
 		const char **config_mounts,
-		unsigned config_mounts_len) {
+		unsigned config_mounts_len,
+		const char *cPath,
+		const char *image) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
 
@@ -323,32 +324,6 @@ static int prestart(const char *rootfs,
     return EXIT_SUCCESS;
 }
 
-//int docker() {
-//
-//  fprintf(stderr, "curl_version: %s\n", curl_version());
-//  DOCKER *docker = docker_init(DOCKER_API_VERSION);
-//
-//  if (docker) {
-//    CURLcode response = docker_post(docker, "http://v1.24/containers/create",
-//                                    "{\"Image\": \"alpine\", \"Cmd\": [\"echo\", \"hello world\"]}");
-//    if (response == CURLE_OK) {
-//      fprintf(stderr, "%s\n", docker_buffer(docker));
-//    }
-//
-//    response = docker_get(docker, "http://v1.24/images/json");
-//
-//    if (response == CURLE_OK) {
-//      pr_pinfo(stderr, "%s\n", docker_buffer(docker));
-//    }
-//
-//    docker_destroy(docker);
-//  } else {
-//    pr_perror(stderr, "ERROR: Failed to get get a docker client!\n");
-//  }
-//
-//  return 0;
-//}
-
 int main(int argc, char *argv[])
 {
 	size_t rd;
@@ -357,6 +332,7 @@ int main(int argc, char *argv[])
 	char errbuf[BUFLEN];
 	char stateData[CONFIGSZ];
 	char configData[CONFIGSZ];
+	char *cPath;
 	_cleanup_fclose_ FILE *fp = NULL;
 	bool docker = false;
 
@@ -420,18 +396,18 @@ int main(int argc, char *argv[])
 			pr_perror("cannot find config file to use");
 			return EXIT_FAILURE;
 		}
-
 		fp = fopen(argv[2], "r");
 	} else {
 		/* bundle_path must be specified for the OCI hooks, and from there we read the configuration file.
 		   If it is not specified, then check that it is specified on the command line.  */
-		const char *bundle_path[] = { "bundlePath", (const char *)0 };
-		yajl_val v_bundle_path = yajl_tree_get(node, bundle_path, yajl_t_string);
-		if (v_bundle_path) {
-			char config_file_name[PATH_MAX];
-			sprintf(config_file_name, "%s/config.json", YAJL_GET_STRING(v_bundle_path));
-			fp = fopen(config_file_name, "r");
-		}
+		return EXIT_FAILURE;
+//		const char *bundle_path[] = { "bundlePath", (const char *)0 };
+//		yajl_val v_bundle_path = yajl_tree_get(node, bundle_path, yajl_t_string);
+//		if (v_bundle_path) {
+//			char config_file_name[PATH_MAX];
+//			sprintf(config_file_name, "%s/config.json", YAJL_GET_STRING(v_bundle_path));
+//			fp = fopen(config_file_name, "r");
+//		}
 	}
 
 
@@ -461,74 +437,19 @@ int main(int argc, char *argv[])
 	}
 
 	char *cmd = NULL;
+	char *image = NULL;
+	char actualpath [PATH_MAX+1];
 	char *mount_label = NULL;
 	const char **config_mounts = NULL;
 	unsigned config_mounts_len = 0;
 
 	if (!docker) {
-		/* Extract values from the config json */
-		const char *mount_label_path[] = { "linux", "mountLabel", (const char *)0 };
-		yajl_val v_mount = yajl_tree_get(config_node, mount_label_path, yajl_t_string);
-		mount_label = v_mount ? YAJL_GET_STRING(v_mount) : "";
-
-		const char *mount_points_path[] = {"mounts", (const char *)0 };
-		yajl_val v_mounts = yajl_tree_get(config_node, mount_points_path, yajl_t_array);
-		if (!v_mounts) {
-			pr_perror("mounts not found in config");
-			return EXIT_FAILURE;
-		}
-
-		config_mounts_len = YAJL_GET_ARRAY(v_mounts)->len;
-		config_mounts = malloc (sizeof(char *) * (config_mounts_len + 1));
-		if (! config_mounts) {
-			pr_perror("error malloc'ing");
-			return EXIT_FAILURE;
-		}
-
-		for (unsigned int i = 0; i < config_mounts_len; i++) {
-			yajl_val v_mounts_values = YAJL_GET_ARRAY(v_mounts)->values[i];
-
-			const char *destination_path[] = {"destination", (const char *)0 };
-			yajl_val v_destination = yajl_tree_get(v_mounts_values, destination_path, yajl_t_string);
-			if (!v_destination) {
-				pr_perror("Cannot find mount destination");
-				return EXIT_FAILURE;
-			}
-			config_mounts[i] = YAJL_GET_STRING(v_destination);
-		}
-
-		const char *args_path[] = {"process", "args", (const char *)0 };
-		yajl_val v_args = yajl_tree_get(config_node, args_path, yajl_t_array);
-		if (!v_args) {
-			pr_perror("args not found in config");
-			return EXIT_FAILURE;
-		}
-		yajl_val v_arg0_value = YAJL_GET_ARRAY(v_args)->values[0];
-		cmd = YAJL_GET_STRING(v_arg0_value);
-
-		const char *envs[] = {"process", "env", (const char *)0 };
-		yajl_val v_envs = yajl_tree_get(config_node, envs, yajl_t_array);
-		if (v_envs) {
-			for (unsigned int i = 0; i < YAJL_GET_ARRAY(v_envs)->len; i++) {
-				yajl_val v_env = YAJL_GET_ARRAY(v_envs)->values[i];
-				char *str = YAJL_GET_STRING(v_env);
-				if (strncmp (str, "container_uuid=", strlen ("container_uuid=")) == 0) {
-					id = strdup (str + strlen ("container_uuid="));
-					/* systemd expects $container_uuid= to be an UUID but then treat it as
-					   not containing any '-'.  Do the same here.  */
-					char *to = id;
-					for (char *from = to; *from; from++) {
-					if (*from != '-')
-						*to++ = *from;
-					}
-					*to = '\0';
-				}
-			}
-		}
+		return EXIT_FAILURE;
 	} else {
 		/* Handle the Docker case here.  */
-
 		/* Extract values from the config json */
+		cPath = dirname(argv[2]);
+
 		const char *mount_label_path[] = { "MountLabel", (const char *)0 };
 		yajl_val v_mount = yajl_tree_get(config_node, mount_label_path, yajl_t_string);
 		if (!v_mount) {
@@ -555,6 +476,14 @@ int main(int argc, char *argv[])
 			return EXIT_FAILURE;
 		}
 		cmd = YAJL_GET_STRING(v_cmd);
+
+		const char *image_path[] = { "Image", (const char *)0 };
+		yajl_val v_image = yajl_tree_get(config_node, image_path, yajl_t_string);
+		if (!v_image) {
+			pr_perror("Image not found in config");
+			return EXIT_FAILURE;
+		}
+		image = YAJL_GET_STRING(v_image);
 	}
 
 //#if ARGS_CHECK
@@ -570,10 +499,12 @@ int main(int argc, char *argv[])
 //	}
 //#endif
 
+	pr_pdebug("%s - %s", cPath, image);
+
 	/* OCI hooks set target_pid to 0 on poststop, as the container process already
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
 	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
-		if (prestart(rootfs, id, target_pid, mount_label, config_mounts, config_mounts_len) != 0) {
+		if (prestart(rootfs, id, target_pid, mount_label, config_mounts, config_mounts_len, cPath, image) != 0) {
             return EXIT_FAILURE;
 		}
 	} else if ((argc > 2 && !strcmp("poststop", argv[1])) || (target_pid == 0)) {

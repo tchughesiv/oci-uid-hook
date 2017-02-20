@@ -25,6 +25,7 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
  - the specified 'uid' does not already exist in /etc/passwd
  
 ### Tested w/ the following on RHEL7 -
+
 ```json
 "docker API version": 1.24
 "docker Version": 1.12.5
@@ -33,11 +34,8 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
 
 To build, install, clean-up:
 
-First, clone this branch, then:
 ### 
 ```shell
-git clone https://github.com/tchughesiv/oci-uid-hook
-cd oci-uid-hook
 autoreconf -i
 ./configure --libexecdir=/usr/libexec/oci/hooks.d
 make
