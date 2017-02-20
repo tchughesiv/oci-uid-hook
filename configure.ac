@@ -9,7 +9,7 @@ AC_SYS_LARGEFILE
 
 PKG_CHECK_MODULES([YAJL], [yajl >= 2.0.0])
 PKG_CHECK_MODULES([SELINUX], [libselinux >= 2.0.0])
-PKG_CHECK_MODULES([LIBCURL], [libcurl >= 7.40.0])
+PKG_CHECK_MODULES([LIBCURL], [libcurl >= 7.29.0])
 PKG_CHECK_MODULES([LIBMOUNT], [mount >= 2.23.0])
 
 AC_MSG_CHECKING([whether to disable argument checking])

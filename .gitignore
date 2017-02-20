@@ -12,11 +12,11 @@ oci-uid-hook.1
 .deps/
 src/.deps/
 src/.dirstamp
-uidhook.o
 src/oci_uid_hook-uidhook.o
+src/oci_uid_hook-docker.o
+uidhook.o
 build-aux/
 config.h
 config.h.in
 stamp-*
 *.gz
-notes

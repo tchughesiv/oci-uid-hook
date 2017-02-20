@@ -19,6 +19,7 @@
 #include <yajl/yajl_tree.h>
 #include <libmount/libmount.h>
 
+#include "docker.h"
 #include "config.h"
 
 #define DOCKER_CONTAINER "docker"
@@ -291,7 +292,127 @@ static int move_mounts(const char *rootfs,
 	return 0;
 }
 
-static int prestart(const char *rootfs,
+int passwdfile_retrieval(char *image) {
+	DOCKER *docker = docker_init(DOCKER_API_VERSION);
+	char *loutput;
+	char *url = NULL;
+	char *post = NULL;
+	char *c_id = NULL;
+
+	asprintf(&url, "http://%s/containers/create", DOCKER_API_VERSION);
+	asprintf(&post, "{\"Image\":\"%s\"}", image);
+	pr_pdebug("%s", url);
+
+	if (docker) {
+	CURLcode response = docker_post(docker, url,
+									post);
+	loutput = docker_buffer(docker);
+	if (response == CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	asprintf(&url, "http://%s/containers/%s/archive?path=/etc/passwd", DOCKER_API_VERSION, c_id);
+	response = docker_get(docker, "http://v1.24/images/json");
+	loutput = docker_buffer(docker);
+	if (response == CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	asprintf(&url, "http://%s/containers/%s?v=1&f=1", DOCKER_API_VERSION, c_id);
+	response = docker_delete(docker, url);
+	loutput = docker_buffer(docker);
+	if (response == CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	docker_destroy(docker);
+	} else {
+	fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
+	}
+
+	return 0;
+}
+
+int container_ref(char *image) {
+	DOCKER *docker = docker_init(DOCKER_API_VERSION);
+	char *loutput;
+	char *post = NULL;
+	asprintf(&post, "{\"Image\":\"%s\"}", image);
+	pr_pdebug("%s", post);
+
+	if (docker) {
+	CURLcode response = docker_post(docker, "http://v1.24/containers/create",
+									post);
+	loutput = docker_buffer(docker);
+	if (response == CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	response = docker_get(docker, "http://v1.24/images/json");
+
+	loutput = docker_buffer(docker);
+	if (response == CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	docker_destroy(docker);
+	} else {
+	fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
+	}
+
+	return 0;
+}
+
+char * image_inspect(const char *image) {
+	_cleanup_(yajl_tree_freep) yajl_val image_config = NULL;
+	char *loutput;
+	char *url = NULL;
+	char *errbuf = NULL;
+	char *image_user = NULL;
+	char *image_co = NULL;
+
+	DOCKER *docker = docker_init(DOCKER_API_VERSION);
+	asprintf(&url, "http://%s/images/%s/json", DOCKER_API_VERSION, image);
+	if (docker) {
+	CURLcode response = docker_get(docker, url);
+
+	loutput = docker_buffer(docker);
+	if (response != CURLE_OK) {
+		pr_pdebug("%s", response);
+		return EXIT_FAILURE;
+	}
+
+	docker_destroy(docker);
+	} else {
+		fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
+	}
+
+	image_config = yajl_tree_parse((const char *)loutput, errbuf, sizeof(errbuf));
+	if (image_config == NULL) {
+		pr_perror("parse_error: ");
+		if (strlen(errbuf)) {
+			pr_perror(" %s", errbuf);
+		} else {
+			pr_perror("unknown error");
+		}
+		return EXIT_FAILURE;
+	}
+
+	const char *config_image[] = { "Config", (const char *)0 };
+	yajl_val v_iconfig = yajl_tree_get(image_config, config_image, yajl_t_object);
+	const char *image_configs[] = { "User", (const char *)0 };
+	yajl_val v_iuser = yajl_tree_get(v_iconfig, image_configs, yajl_t_string);
+	char *image_cs = YAJL_GET_STRING(v_iuser);		
+
+	if (image_cs == "") {
+		image_cs = "0";
+	}
+
+	pr_pdebug("image user: %s", image_cs);
+	return image_cs;
+}
+
+int prestart(const char *rootfs,
 		const char *id,
 		int pid,
 		const char *mount_label,
@@ -301,6 +422,9 @@ static int prestart(const char *rootfs,
 		const char *image) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
+
+	char *image_u = image_inspect(image);
+	pr_pdebug("image user: %s", image_u);
 
 	int rc = -1;
 	char process_mnt_ns_fd[PATH_MAX];
@@ -312,20 +436,36 @@ static int prestart(const char *rootfs,
 		return -1;
 	}
 
+	char resolvedPath[PATH_MAX];
+	realpath("/proc/1/ns/mnt", resolvedPath);
+	pr_pdebug("readlink pid 1 mnt of host - %s", resolvedPath);
+
+	realpath("/proc/self/ns/mnt", resolvedPath);
+	pr_pdebug("readlink self mnt of hook process - %s", resolvedPath);
+
+	realpath(process_mnt_ns_fd, resolvedPath);
+	pr_pdebug("readlink proc mnt of container - %s", resolvedPath);
 	/* Join the mount namespace of the target process */
 	if (setns(fd, 0) == -1) {
 		pr_pinfo("Failed to setns to %s", process_mnt_ns_fd);
 		return -1;
-	} else {
-        pr_pdebug("setns to %s succeeded", process_mnt_ns_fd);
-    }
+	}
 	close(fd);
 	fd = -1;
+
+		/* Switch to the root directory */
+	if (chdir("/") == -1) {
+		pr_perror("Failed to chdir");
+		return -1;
+	}
+
+	realpath("/proc/self/ns/mnt", resolvedPath);
+	pr_pdebug("readlink self mnt in ns - %s", resolvedPath);
+
     return EXIT_SUCCESS;
 }
 
-int main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
 	size_t rd;
 	_cleanup_(yajl_tree_freep) yajl_val node = NULL;
 	_cleanup_(yajl_tree_freep) yajl_val config_node = NULL;
@@ -401,13 +541,6 @@ int main(int argc, char *argv[])
 		/* bundle_path must be specified for the OCI hooks, and from there we read the configuration file.
 		   If it is not specified, then check that it is specified on the command line.  */
 		return EXIT_FAILURE;
-//		const char *bundle_path[] = { "bundlePath", (const char *)0 };
-//		yajl_val v_bundle_path = yajl_tree_get(node, bundle_path, yajl_t_string);
-//		if (v_bundle_path) {
-//			char config_file_name[PATH_MAX];
-//			sprintf(config_file_name, "%s/config.json", YAJL_GET_STRING(v_bundle_path));
-//			fp = fopen(config_file_name, "r");
-//		}
 	}
 
 
@@ -438,7 +571,6 @@ int main(int argc, char *argv[])
 
 	char *cmd = NULL;
 	char *image = NULL;
-	char actualpath [PATH_MAX+1];
 	char *mount_label = NULL;
 	const char **config_mounts = NULL;
 	unsigned config_mounts_len = 0;
@@ -499,9 +631,7 @@ int main(int argc, char *argv[])
 //	}
 //#endif
 
-	pr_pdebug("%s - %s", cPath, image);
-
-	/* OCI hooks set target_pid to 0 on poststop, as the container process already
+	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
 	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
 		if (prestart(rootfs, id, target_pid, mount_label, config_mounts, config_mounts_len, cPath, image) != 0) {
