@@ -456,7 +456,7 @@ int prestart(const char *rootfs,
 
 	char *newPasswd = NULL;
 	char *newPasswdNew = NULL;
-	char *image_username = NULL;
+	const char *image_username = NULL;
 	char line_storage[100], buffer[100];
 	int check, line_num = 1;
 	asprintf(&newPasswd, "%s/passwd", cPath);
@@ -486,7 +486,9 @@ int prestart(const char *rootfs,
 		sscanf(line_storage,"%s",buffer);
 		if(strstr(buffer,i_user_search) != NULL)  check = 1;
 		if(check == 1) {
-			image_username = strtok(buffer,":");
+			char *image_un = strtok(buffer,":");
+			asprintf(&image_username, "%s", image_un);
+			pr_pinfo("username = %s", image_username);
 		}
 		line_num++;
 	}
@@ -499,6 +501,8 @@ int prestart(const char *rootfs,
 	char *i_user_r = NULL;
 	asprintf(&i_user_s, "%s:x:%s:", image_username, image_u);
 	asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
+	pr_pinfo("%s", i_user_s);
+	pr_pinfo("%s", i_user_r);
 	while( fgets(line_storage, sizeof(line_storage), input3) != NULL )  {
 		check = 0;
 		sscanf(line_storage,"%[^\t\n]",buffer);
@@ -516,9 +520,14 @@ int prestart(const char *rootfs,
 
 	remove(newPasswd);
 	rename(newPasswdNew, newPasswd);
-	chmod(newPasswd, 0400);
+	chmod(newPasswd, 0644);
+
+	// set selinux perms... need a better way? can't rely on hosts file?'
+	char *chcon_command = NULL;
+	asprintf(&chcon_command, "chcon --reference=%s/hosts %s", cPath, newPasswd);
+	system(chcon_command);
+
 	pr_pinfo("%s", newPasswd);
-	//mode
 
 	int rc = -1;
 	char process_mnt_ns_fd[PATH_MAX];
@@ -592,6 +601,15 @@ int prestart(const char *rootfs,
 		return EXIT_FAILURE;
 	}
 
+	// bind mount /etc/passwd
+	char dest[PATH_MAX];
+	snprintf(dest, PATH_MAX, "%s%s", rootfs, ETC_PASSWD);
+
+	if (bind_mount(newPasswd, dest, false) < 0) {
+		return -1;
+	}
+
+	pr_pinfo("docker exec %s whoami", id);
 	return EXIT_SUCCESS;
 }
 
