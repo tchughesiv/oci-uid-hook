@@ -14,8 +14,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <inttypes.h>
-//#include <ctype.h>
-#include <sys/stat.h>  /* For mkdir() */
+#include <libtar.h>
 #include <linux/limits.h>
 #include <selinux/selinux.h>
 #include <yajl/yajl_tree.h>
@@ -294,36 +293,6 @@ static int move_mounts(const char *rootfs,
 	return 0;
 }
 
-int container_ref(char *image) {
-	DOCKER *docker = docker_init(DOCKER_API_VERSION);
-	char *loutput;
-	char *post = NULL;
-	asprintf(&post, "{\"Image\":\"%s\"}", image);
-	pr_pdebug("%s", post);
-
-	if (docker) {
-	CURLcode response = docker_post(docker, "http://v1.24/containers/create",
-									post);
-	loutput = docker_buffer(docker);
-	if (response == CURLE_OK) {
-		pr_pdebug("%s", loutput);
-	}
-
-	response = docker_get(docker, "http://v1.24/images/json");
-
-	loutput = docker_buffer(docker);
-	if (response == CURLE_OK) {
-		pr_pdebug("%s", loutput);
-	}
-
-	docker_destroy(docker);
-	} else {
-	fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
-	}
-
-	return 0;
-}
-
 char *image_inspect(const char *image) {
 	_cleanup_(yajl_tree_freep) yajl_val image_config = NULL;
 	char *loutput;
@@ -369,169 +338,7 @@ char *image_inspect(const char *image) {
 
 	return image_cs;
 }
-
-/* Parse an octal number, ignoring leading and trailing nonsense. */
-static int parseoct(const char *p, size_t n) {
-	int i = 0;
-
-	while ((*p < '0' || *p > '7') && n > 0) {
-		++p;
-		--n;
-	}
-	while (*p >= '0' && *p <= '7' && n > 0) {
-		i *= 8;
-		i += *p - '0';
-		++p;
-		--n;
-	}
-	return (i);
-}
-
-/* Returns true if this is 512 zero bytes. */
-static int is_end_of_archive(const char *p) {
-	int n;
-	for (n = 511; n >= 0; --n)
-		if (p[n] != '\0')
-			return (0);
-	return (1);
-}
-
-/* Create a directory, including parent directories as necessary. */
-static void create_dir(char *pathname, int mode) {
-	char *p;
-	int r;
-
-	/* Strip trailing '/' */
-	if (pathname[strlen(pathname) - 1] == '/')
-		pathname[strlen(pathname) - 1] = '\0';
-
-	/* Try creating the directory. */
-	r = mkdir(pathname, mode);
-
-	if (r != 0) {
-		/* On failure, try creating parent directory. */
-		p = strrchr(pathname, '/');
-		if (p != NULL) {
-			*p = '\0';
-			create_dir(pathname, 0755);
-			*p = '/';
-			r = mkdir(pathname, mode);
-		}
-	}
-	if (r != 0)
-		fprintf(stderr, "Could not create directory %s\n", pathname);
-}
-
-/* Create a file, including parent directory as necessary. */
-static FILE * create_file(char *pathname, int mode) {
-	FILE *f;
-	f = fopen(pathname, "wb+");
-	if (f == NULL) {
-		/* Try creating parent dir and then creating file. */
-		char *p = strrchr(pathname, '/');
-		if (p != NULL) {
-			*p = '\0';
-			create_dir(pathname, 0755);
-			*p = '/';
-			f = fopen(pathname, "wb+");
-		}
-	}
-	return (f);
-}
-
-/* Verify the tar checksum. */
-static int verify_checksum(const char *p) {
-	int n, u = 0;
-	for (n = 0; n < 512; ++n) {
-		if (n < 148 || n > 155)
-			/* Standard tar checksum adds unsigned bytes. */
-			u += ((unsigned char *)p)[n];
-		else
-			u += 0x20;
-
-	}
-	return (u == parseoct(p + 148, 8));
-}
-
-/* Extract a tar archive. */
-static void untar(FILE *a, const char *path) {
-	char buff[512];
-	FILE *f = NULL;
-	size_t bytes_read;
-	int filesize;
-
-	printf("Extracting from %s\n", path);
-	for (;;) {
-		bytes_read = fread(buff, 1, 512, a);
-		if (bytes_read < 512) {
-			fprintf(stderr,
-			    "Short read on %s: expected 512, got %d\n",
-			    path, (int)bytes_read);
-			return;
-		}
-		if (is_end_of_archive(buff)) {
-			printf("End of %s\n", path);
-			return;
-		}
-		if (!verify_checksum(buff)) {
-			fprintf(stderr, "Checksum failure\n");
-			return;
-		}
-		filesize = parseoct(buff + 124, 12);
-		switch (buff[156]) {
-		case '1':
-			printf(" Ignoring hardlink %s\n", buff);
-			break;
-		case '2':
-			printf(" Ignoring symlink %s\n", buff);
-			break;
-		case '3':
-			printf(" Ignoring character device %s\n", buff);
-				break;
-		case '4':
-			printf(" Ignoring block device %s\n", buff);
-			break;
-		case '5':
-			printf(" Extracting dir %s\n", buff);
-			create_dir(buff, parseoct(buff + 100, 8));
-			filesize = 0;
-			break;
-		case '6':
-			printf(" Ignoring FIFO %s\n", buff);
-			break;
-		default:
-			printf(" Extracting file %s\n", buff);
-			f = create_file(buff, parseoct(buff + 100, 8));
-			break;
-		}
-		while (filesize > 0) {
-			bytes_read = fread(buff, 1, 512, a);
-			if (bytes_read < 512) {
-				fprintf(stderr,
-				    "Short read on %s: Expected 512, got %d\n",
-				    path, (int)bytes_read);
-				return;
-			}
-			if (filesize < 512)
-				bytes_read = filesize;
-			if (f != NULL) {
-				if (fwrite(buff, 1, bytes_read, f)
-				    != bytes_read)
-				{
-					fprintf(stderr, "Failed write\n");
-					fclose(f);
-					f = NULL;
-				}
-			}
-			filesize -= bytes_read;
-		}
-		if (f != NULL) {
-			fclose(f);
-			f = NULL;
-		}
-	}
-}
-
+ 
 int passwdfile_retrieval(const char *image, const char *cPath) {
 	DOCKER *docker = docker_init(DOCKER_API_VERSION);
 	_cleanup_(yajl_tree_freep) yajl_val cont_response = NULL;
@@ -586,13 +393,6 @@ int passwdfile_retrieval(const char *image, const char *cPath) {
 		pr_pdebug("%s", loutput);
 	}
 
-	FILE *pwfile;
-	pwfile = fopen(newPasswd,"w");
-	untar(pwfile, newPasswdTar);
-	fclose(pwfile);
-
-	pr_pdebug("%s", newPasswd);
-
 	asprintf(&url, "http://%s/containers/%s?v=1&f=1", DOCKER_API_VERSION, cid);
 	response = docker_delete(docker, url);
 	loutput = docker_buffer(docker);
@@ -605,7 +405,30 @@ int passwdfile_retrieval(const char *image, const char *cPath) {
 	fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
 	}
 
+	char *untar_command = NULL;
+	asprintf(&untar_command, "tar xf %s -C %s", newPasswdTar, newCpath);
+	system(untar_command);
+
+	if( access(newPasswd, F_OK) != -1 ) {
+		remove(newPasswdTar);
+	}
+
 	return 0;
+}
+
+char *replace_str(char *str, char *orig, char *rep) {
+  static char buffer[4096];
+  char *p;
+
+  if(!(p = strstr(str, orig)))  // Is 'orig' even in 'str'?
+    return str;
+
+  strncpy(buffer, str, p-str); // Copy characters from 'str' start to 'orig' st$
+  buffer[p-str] = '\0';
+
+  sprintf(buffer+(p-str), "%s%s", rep, p+strlen(orig));
+
+  return buffer;
 }
 
 int prestart(const char *rootfs,
@@ -630,6 +453,72 @@ int prestart(const char *rootfs,
 	if (passwdfile_retrieval(image, cPath) != 0) {
         return EXIT_FAILURE;
 	}
+
+	char *newPasswd = NULL;
+	char *newPasswdNew = NULL;
+	char *image_username = NULL;
+	char line_storage[100], buffer[100];
+	int check, line_num = 1;
+	asprintf(&newPasswd, "%s/passwd", cPath);
+	
+	// bypass hook, existing user name matches specified uid
+	FILE *input = fopen(newPasswd, "r");
+	char *c_user_search = NULL;
+	asprintf(&c_user_search, ":x:%s:", cont_cu);
+	while( fgets(line_storage, sizeof(line_storage), input) != NULL )  {
+		check = 0;
+		sscanf(line_storage,"%s",buffer);
+		if(strstr(buffer,c_user_search) != NULL)  check = 1;
+		if(check == 1) {
+			remove(newPasswd);
+			fclose(input);
+			return EXIT_SUCCESS;
+		}
+		line_num++;
+	}
+	fclose(input);
+
+	FILE *input2 = fopen(newPasswd, "r");
+	char *i_user_search = NULL;
+	asprintf(&i_user_search, ":x:%s:", image_u);
+	while( fgets(line_storage, sizeof(line_storage), input2) != NULL )  {
+		check = 0;
+		sscanf(line_storage,"%s",buffer);
+		if(strstr(buffer,i_user_search) != NULL)  check = 1;
+		if(check == 1) {
+			image_username = strtok(buffer,":");
+		}
+		line_num++;
+	}
+	fclose(input2);
+
+	asprintf(&newPasswdNew, "%s.new", newPasswd);
+	FILE *input3 = fopen(newPasswd, "r");
+	FILE *inputnew = fopen(newPasswdNew, "w");
+	char *i_user_s = NULL;
+	char *i_user_r = NULL;
+	asprintf(&i_user_s, "%s:x:%s:", image_username, image_u);
+	asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
+	while( fgets(line_storage, sizeof(line_storage), input3) != NULL )  {
+		check = 0;
+		sscanf(line_storage,"%[^\t\n]",buffer);
+		if(strstr(buffer,i_user_s) != NULL)  check = 1;
+		if(check != 1) {
+			fputs(buffer, inputnew);
+		} else {
+			fputs(replace_str(buffer, i_user_s, i_user_r), inputnew);
+		}
+		fputs("\n", inputnew);
+		line_num++;
+	}
+	fclose(input3);
+	fclose(inputnew);
+
+	remove(newPasswd);
+	rename(newPasswdNew, newPasswd);
+	chmod(newPasswd, 0400);
+	pr_pinfo("%s", newPasswd);
+	//mode
 
 	int rc = -1;
 	char process_mnt_ns_fd[PATH_MAX];
