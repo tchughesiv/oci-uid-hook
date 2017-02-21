@@ -1,5 +1,5 @@
 libexec_PROGRAMS = oci-uid-hook
-oci_uid_hook_SOURCES= src/uidhook.c src/docker.c
+oci_uid_hook_SOURCES= src/uidhook.c src/container_api.c
 
 oci_uid_hook_CFLAGS = -Wall -Wextra -std=c99 $(YAJL_CFLAGS)
 oci_uid_hook_LDADD = $(YAJL_LIBS)

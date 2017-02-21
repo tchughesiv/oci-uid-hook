@@ -2,7 +2,7 @@
 // Created by Daniel Suo on 2/2/17.
 //
 
-#include "docker.h"
+#include "container_api.h"
 
 void malloc_fail() {
   fprintf(stderr, "ERROR: Failed to allocate memory. Committing seppuku.");
