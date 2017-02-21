@@ -108,7 +108,7 @@ static int bind_mount(const char *src, const char *dest, int readonly) {
 static bool contains_mount(char **config_mounts, unsigned len, const char *mount) {
 	for (unsigned i = 0; i < len; i++) {
 		if (!strcmp(mount, config_mounts[i])) {
-			pr_pdebug("%s already present as a mount in container, skipping...\n", mount);
+			pr_pinfo("%s already present as a mount in container, skipping...\n", mount);
 			return true;
 		}
 	}
@@ -125,7 +125,7 @@ char *image_inspect(char *image, const char *idriver) {
 	_cleanup_fclose_ FILE *fp = NULL;
 
 	char *pch;
-	char *ihash;
+	char *ihash = NULL;
 	pch = strtok(image,":");
 	while (pch != NULL)
 	{
@@ -136,8 +136,6 @@ char *image_inspect(char *image, const char *idriver) {
 	}
 
 	asprintf(&image_json, "/var/lib/docker/image/%s/imagedb/content/sha256/%s", idriver, ihash);
-	pr_pinfo("%s", image_json);
-
 	fp = fopen(image_json, "r");
 	/* Parse the config file */
 	if (fp == NULL) {
@@ -305,7 +303,6 @@ int prestart(const char *rootfs,
 	char *i_user_r = NULL;
 	asprintf(&i_user_s, "%s:x:%s:", image_username, image_u);
 	asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
-	pr_pinfo("%s", i_user_r);
 	while( fgets(line_storage, sizeof(line_storage), input3) != NULL )  {
 		check = 0;
 		sscanf(line_storage,"%[^\t\n]",buffer);
