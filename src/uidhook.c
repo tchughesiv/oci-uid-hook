@@ -14,6 +14,8 @@
 #include <unistd.h>
 #include <errno.h>
 #include <inttypes.h>
+//#include <ctype.h>
+#include <sys/stat.h>  /* For mkdir() */
 #include <linux/limits.h>
 #include <selinux/selinux.h>
 #include <yajl/yajl_tree.h>
@@ -292,47 +294,6 @@ static int move_mounts(const char *rootfs,
 	return 0;
 }
 
-int passwdfile_retrieval(char *image) {
-	DOCKER *docker = docker_init(DOCKER_API_VERSION);
-	char *loutput;
-	char *url = NULL;
-	char *post = NULL;
-	char *c_id = NULL;
-
-	asprintf(&url, "http://%s/containers/create", DOCKER_API_VERSION);
-	asprintf(&post, "{\"Image\":\"%s\"}", image);
-	pr_pdebug("%s", url);
-
-	if (docker) {
-	CURLcode response = docker_post(docker, url,
-									post);
-	loutput = docker_buffer(docker);
-	if (response == CURLE_OK) {
-		pr_pdebug("%s", loutput);
-	}
-
-	asprintf(&url, "http://%s/containers/%s/archive?path=/etc/passwd", DOCKER_API_VERSION, c_id);
-	response = docker_get(docker, "http://v1.24/images/json");
-	loutput = docker_buffer(docker);
-	if (response == CURLE_OK) {
-		pr_pdebug("%s", loutput);
-	}
-
-	asprintf(&url, "http://%s/containers/%s?v=1&f=1", DOCKER_API_VERSION, c_id);
-	response = docker_delete(docker, url);
-	loutput = docker_buffer(docker);
-	if (response == CURLE_OK) {
-		pr_pdebug("%s", loutput);
-	}
-
-	docker_destroy(docker);
-	} else {
-	fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
-	}
-
-	return 0;
-}
-
 int container_ref(char *image) {
 	DOCKER *docker = docker_init(DOCKER_API_VERSION);
 	char *loutput;
@@ -363,13 +324,12 @@ int container_ref(char *image) {
 	return 0;
 }
 
-char * image_inspect(const char *image) {
+char *image_inspect(const char *image) {
 	_cleanup_(yajl_tree_freep) yajl_val image_config = NULL;
 	char *loutput;
 	char *url = NULL;
 	char *errbuf = NULL;
-	char *image_user = NULL;
-	char *image_co = NULL;
+	char *image_cs = NULL;
 
 	DOCKER *docker = docker_init(DOCKER_API_VERSION);
 	asprintf(&url, "http://%s/images/%s/json", DOCKER_API_VERSION, image);
@@ -378,7 +338,6 @@ char * image_inspect(const char *image) {
 
 	loutput = docker_buffer(docker);
 	if (response != CURLE_OK) {
-		pr_pdebug("%s", response);
 		return EXIT_FAILURE;
 	}
 
@@ -402,14 +361,251 @@ char * image_inspect(const char *image) {
 	yajl_val v_iconfig = yajl_tree_get(image_config, config_image, yajl_t_object);
 	const char *image_configs[] = { "User", (const char *)0 };
 	yajl_val v_iuser = yajl_tree_get(v_iconfig, image_configs, yajl_t_string);
-	char *image_cs = YAJL_GET_STRING(v_iuser);		
+	asprintf(&image_cs, "%s", YAJL_GET_STRING(v_iuser));
 
-	if (image_cs == "") {
+	if (strcmp(image_cs, "") == 0) {
 		image_cs = "0";
 	}
 
-	pr_pdebug("image user: %s", image_cs);
 	return image_cs;
+}
+
+/* Parse an octal number, ignoring leading and trailing nonsense. */
+static int parseoct(const char *p, size_t n) {
+	int i = 0;
+
+	while ((*p < '0' || *p > '7') && n > 0) {
+		++p;
+		--n;
+	}
+	while (*p >= '0' && *p <= '7' && n > 0) {
+		i *= 8;
+		i += *p - '0';
+		++p;
+		--n;
+	}
+	return (i);
+}
+
+/* Returns true if this is 512 zero bytes. */
+static int is_end_of_archive(const char *p) {
+	int n;
+	for (n = 511; n >= 0; --n)
+		if (p[n] != '\0')
+			return (0);
+	return (1);
+}
+
+/* Create a directory, including parent directories as necessary. */
+static void create_dir(char *pathname, int mode) {
+	char *p;
+	int r;
+
+	/* Strip trailing '/' */
+	if (pathname[strlen(pathname) - 1] == '/')
+		pathname[strlen(pathname) - 1] = '\0';
+
+	/* Try creating the directory. */
+	r = mkdir(pathname, mode);
+
+	if (r != 0) {
+		/* On failure, try creating parent directory. */
+		p = strrchr(pathname, '/');
+		if (p != NULL) {
+			*p = '\0';
+			create_dir(pathname, 0755);
+			*p = '/';
+			r = mkdir(pathname, mode);
+		}
+	}
+	if (r != 0)
+		fprintf(stderr, "Could not create directory %s\n", pathname);
+}
+
+/* Create a file, including parent directory as necessary. */
+static FILE * create_file(char *pathname, int mode) {
+	FILE *f;
+	f = fopen(pathname, "wb+");
+	if (f == NULL) {
+		/* Try creating parent dir and then creating file. */
+		char *p = strrchr(pathname, '/');
+		if (p != NULL) {
+			*p = '\0';
+			create_dir(pathname, 0755);
+			*p = '/';
+			f = fopen(pathname, "wb+");
+		}
+	}
+	return (f);
+}
+
+/* Verify the tar checksum. */
+static int verify_checksum(const char *p) {
+	int n, u = 0;
+	for (n = 0; n < 512; ++n) {
+		if (n < 148 || n > 155)
+			/* Standard tar checksum adds unsigned bytes. */
+			u += ((unsigned char *)p)[n];
+		else
+			u += 0x20;
+
+	}
+	return (u == parseoct(p + 148, 8));
+}
+
+/* Extract a tar archive. */
+static void untar(FILE *a, const char *path) {
+	char buff[512];
+	FILE *f = NULL;
+	size_t bytes_read;
+	int filesize;
+
+	printf("Extracting from %s\n", path);
+	for (;;) {
+		bytes_read = fread(buff, 1, 512, a);
+		if (bytes_read < 512) {
+			fprintf(stderr,
+			    "Short read on %s: expected 512, got %d\n",
+			    path, (int)bytes_read);
+			return;
+		}
+		if (is_end_of_archive(buff)) {
+			printf("End of %s\n", path);
+			return;
+		}
+		if (!verify_checksum(buff)) {
+			fprintf(stderr, "Checksum failure\n");
+			return;
+		}
+		filesize = parseoct(buff + 124, 12);
+		switch (buff[156]) {
+		case '1':
+			printf(" Ignoring hardlink %s\n", buff);
+			break;
+		case '2':
+			printf(" Ignoring symlink %s\n", buff);
+			break;
+		case '3':
+			printf(" Ignoring character device %s\n", buff);
+				break;
+		case '4':
+			printf(" Ignoring block device %s\n", buff);
+			break;
+		case '5':
+			printf(" Extracting dir %s\n", buff);
+			create_dir(buff, parseoct(buff + 100, 8));
+			filesize = 0;
+			break;
+		case '6':
+			printf(" Ignoring FIFO %s\n", buff);
+			break;
+		default:
+			printf(" Extracting file %s\n", buff);
+			f = create_file(buff, parseoct(buff + 100, 8));
+			break;
+		}
+		while (filesize > 0) {
+			bytes_read = fread(buff, 1, 512, a);
+			if (bytes_read < 512) {
+				fprintf(stderr,
+				    "Short read on %s: Expected 512, got %d\n",
+				    path, (int)bytes_read);
+				return;
+			}
+			if (filesize < 512)
+				bytes_read = filesize;
+			if (f != NULL) {
+				if (fwrite(buff, 1, bytes_read, f)
+				    != bytes_read)
+				{
+					fprintf(stderr, "Failed write\n");
+					fclose(f);
+					f = NULL;
+				}
+			}
+			filesize -= bytes_read;
+		}
+		if (f != NULL) {
+			fclose(f);
+			f = NULL;
+		}
+	}
+}
+
+int passwdfile_retrieval(const char *image, const char *cPath) {
+	DOCKER *docker = docker_init(DOCKER_API_VERSION);
+	_cleanup_(yajl_tree_freep) yajl_val cont_response = NULL;
+	char *loutput;
+	char errbuf[BUFLEN];
+	char *url = NULL;
+	char *post = NULL;
+	const char *newPasswd = NULL;
+	const char *newPasswdTar = NULL;
+	const char *newCpath = NULL;
+	char *c_id = NULL;
+
+	asprintf(&url, "http://%s/containers/create", DOCKER_API_VERSION);
+	asprintf(&post, "{\"Image\":\"%s\"}", image);
+
+	if (docker) {
+	CURLcode response = docker_post(docker, url,
+									post);
+	loutput = docker_buffer(docker);
+	if (response != CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	cont_response = yajl_tree_parse((const char *)loutput, errbuf, sizeof(errbuf));
+	if (cont_response == NULL) {
+		pr_perror("parse_error: ");
+		if (strlen(errbuf)) {
+			pr_perror(" %s", errbuf);
+		} else {
+			pr_perror("unknown error");
+		}
+		return EXIT_FAILURE;
+	}
+
+	const char *cont_id[] = { "Id", (const char *)0 };
+	yajl_val v_id = yajl_tree_get(cont_response, cont_id, yajl_t_string);
+	if (!v_id) {
+		pr_perror("id not found in response");
+		return EXIT_FAILURE;
+	}
+	char *cid = NULL;
+	asprintf(&cid, "%s", YAJL_GET_STRING(v_id));
+
+	asprintf(&newCpath, "%s/", cPath);
+	asprintf(&newPasswd, "%s/passwd", cPath);
+	asprintf(&newPasswdTar, "%s.tar", newPasswd);
+
+	asprintf(&url, "http://%s/containers/%s/archive?path=%s", DOCKER_API_VERSION, cid, ETC_PASSWD);
+	response = docker_get_archive(docker, url, newPasswdTar);
+	loutput = docker_buffer(docker);
+	if (response != CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	FILE *pwfile;
+	pwfile = fopen(newPasswd,"w");
+	untar(pwfile, newPasswdTar);
+	fclose(pwfile);
+
+	pr_pdebug("%s", newPasswd);
+
+	asprintf(&url, "http://%s/containers/%s?v=1&f=1", DOCKER_API_VERSION, cid);
+	response = docker_delete(docker, url);
+	loutput = docker_buffer(docker);
+	if (response != CURLE_OK) {
+		pr_pdebug("%s", loutput);
+	}
+
+	docker_destroy(docker);
+	} else {
+	fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
+	}
+
+	return 0;
 }
 
 int prestart(const char *rootfs,
@@ -419,12 +615,21 @@ int prestart(const char *rootfs,
 		const char **config_mounts,
 		unsigned config_mounts_len,
 		const char *cPath,
-		const char *image) {
+		const char *image,
+		const char *cont_cu) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
 
 	char *image_u = image_inspect(image);
-	pr_pdebug("image user: %s", image_u);
+
+	// bypass hook if passed uid matches image user
+	if (strcmp(image_u, cont_cu) == 0) {
+		return EXIT_SUCCESS;
+	}
+
+	if (passwdfile_retrieval(image, cPath) != 0) {
+        return EXIT_FAILURE;
+	}
 
 	int rc = -1;
 	char process_mnt_ns_fd[PATH_MAX];
@@ -436,15 +641,32 @@ int prestart(const char *rootfs,
 		return -1;
 	}
 
+	char *pch;
+	char *self_v;
 	char resolvedPath[PATH_MAX];
-	realpath("/proc/1/ns/mnt", resolvedPath);
-	pr_pdebug("readlink pid 1 mnt of host - %s", resolvedPath);
-
 	realpath("/proc/self/ns/mnt", resolvedPath);
-	pr_pdebug("readlink self mnt of hook process - %s", resolvedPath);
+	pch = strtok(resolvedPath,":");
+	while (pch != NULL)
+	{
+		pch = strtok(NULL, ":");
+		if (pch != NULL) {
+			self_v = pch;
+		}
+	}
 
-	realpath(process_mnt_ns_fd, resolvedPath);
-	pr_pdebug("readlink proc mnt of container - %s", resolvedPath);
+	char *pchproc;
+	char *proc_v;
+	char resolvedPathProc[PATH_MAX];
+	realpath(process_mnt_ns_fd, resolvedPathProc);
+	pchproc = strtok(resolvedPathProc,":");
+	while (pchproc != NULL)
+	{
+		pchproc = strtok(NULL, ":");
+		if (pchproc != NULL) {
+			proc_v = pchproc;
+		}
+	}
+
 	/* Join the mount namespace of the target process */
 	if (setns(fd, 0) == -1) {
 		pr_pinfo("Failed to setns to %s", process_mnt_ns_fd);
@@ -453,16 +675,35 @@ int prestart(const char *rootfs,
 	close(fd);
 	fd = -1;
 
-		/* Switch to the root directory */
+	/* Switch to the root directory of ns */
 	if (chdir("/") == -1) {
 		pr_perror("Failed to chdir");
 		return -1;
 	}
 
-	realpath("/proc/self/ns/mnt", resolvedPath);
-	pr_pdebug("readlink self mnt in ns - %s", resolvedPath);
+	char *pchns;
+	char *ns_v;
+	char resolvedPathNs[PATH_MAX];
+	realpath("/proc/self/ns/mnt", resolvedPathNs);
+	pchns = strtok(resolvedPathNs,":");
+	while (pchns != NULL)
+	{
+		pchns = strtok(NULL, ":");
+		if (pchns != NULL) {
+			ns_v = pchns;
+		}
+	}
 
-    return EXIT_SUCCESS;
+	/*
+	Ensure we've entered container mnt namespace before bind mount of /etc/passwd.
+	*/
+	if ((strcmp(self_v, proc_v) != 0) || (strcmp(proc_v, ns_v) == 0)) {
+		pr_pdebug("mnt setns successful - %s", ns_v);
+	} else {
+		return EXIT_FAILURE;
+	}
+
+	return EXIT_SUCCESS;
 }
 
 int main(int argc, char *argv[]) {
@@ -572,6 +813,7 @@ int main(int argc, char *argv[]) {
 	char *cmd = NULL;
 	char *image = NULL;
 	char *mount_label = NULL;
+	const char *cont_cu = NULL;
 	const char **config_mounts = NULL;
 	unsigned config_mounts_len = 0;
 
@@ -616,25 +858,28 @@ int main(int argc, char *argv[]) {
 			return EXIT_FAILURE;
 		}
 		image = YAJL_GET_STRING(v_image);
+
+		const char *config_cont[] = { "Config", (const char *)0 };
+		yajl_val v_config = yajl_tree_get(config_node, config_cont, yajl_t_object);
+		const char *cont_configs[] = { "User", (const char *)0 };
+		yajl_val v_cuser = yajl_tree_get(v_config, cont_configs, yajl_t_string);
+		asprintf(&cont_cu, "%s", YAJL_GET_STRING(v_cuser));
 	}
 
-//#if ARGS_CHECK
-//	/* Don't do anything if init is actually docker bind mounted /dev/init */
-//	if (!strcmp(cmd, "/dev/init")) {
-//		pr_pdebug("Skipping as container command is /dev/init, not systemd init\n");
-//		return EXIT_SUCCESS;
-//	}
-//	char *cmd_file_name = basename(cmd);
-//	if (strcmp("init", cmd_file_name) && strcmp("systemd", cmd_file_name)) {
-//		pr_pdebug("Skipping as container command is %s, not init or systemd\n", cmd);
-//		return EXIT_SUCCESS;
-//	}
-//#endif
+	// bypass hook if /etc/passwd already bind mounted
+	if (contains_mount(config_mounts, config_mounts_len, ETC_PASSWD)) {
+		return EXIT_SUCCESS;
+	}
+
+	// bypass hook if passwd user is not numeric
+    if (atoi(cont_cu)==0){
+		return EXIT_SUCCESS;
+	}
 
 	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
 	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
-		if (prestart(rootfs, id, target_pid, mount_label, config_mounts, config_mounts_len, cPath, image) != 0) {
+		if (prestart(rootfs, id, target_pid, mount_label, config_mounts, config_mounts_len, cPath, image, cont_cu) != 0) {
             return EXIT_FAILURE;
 		}
 	} else if ((argc > 2 && !strcmp("poststop", argv[1])) || (target_pid == 0)) {
@@ -643,5 +888,6 @@ int main(int argc, char *argv[]) {
 		pr_perror("command not recognized: %s", argv[1]);
 		return EXIT_FAILURE;
 	}
+
 	return EXIT_SUCCESS;
 }
