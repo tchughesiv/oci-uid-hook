@@ -20,7 +20,6 @@
 #include <yajl/yajl_tree.h>
 #include <libmount/libmount.h>
 
-#include "container_api.h"
 #include "config.h"
 
 #define DOCKER_CONTAINER "docker"
@@ -117,30 +116,46 @@ static bool contains_mount(char **config_mounts, unsigned len, const char *mount
 	return false;
 }
 
-char *image_inspect(const char *image) {
-	_cleanup_(yajl_tree_freep) yajl_val image_config = NULL;
-	char *loutput;
-	char *url = NULL;
-	char *errbuf = NULL;
+char *image_inspect(char *image, const char *idriver) {
+	size_t rd;
+	_cleanup_(yajl_tree_freep) yajl_val image_node = NULL;
+	char errbuf[BUFLEN];
+	char imageData[CONFIGSZ];
+	char *image_json = NULL;
 	char *image_cs = NULL;
+	_cleanup_fclose_ FILE *fp = NULL;
 
-	DOCKER *docker = docker_init(DOCKER_API_VERSION);
-	asprintf(&url, "http://%s/images/%s/json", DOCKER_API_VERSION, image);
-	if (docker) {
-	CURLcode response = docker_get(docker, url);
+	char *pch;
+	char *ihash;
+	pch = strtok(image,":");
+	while (pch != NULL)
+	{
+		pch = strtok(NULL, ":");
+		if (pch != NULL) {
+			ihash = pch;
+		}
+	}
 
-	loutput = docker_buffer(docker);
-	if (response != CURLE_OK) {
+	asprintf(&image_json, "/var/lib/docker/image/%s/imagedb/content/sha256/%s", idriver, ihash);
+	pr_pinfo("%s", image_json);
+
+	fp = fopen(image_json, "r");
+	/* Parse the config file */
+	if (fp == NULL) {
+		pr_perror("Failed to open config file: %s", image_json);
+		return EXIT_FAILURE;
+	}
+	rd = fread((void *)imageData, 1, sizeof(imageData) - 1, fp);
+	if (rd == 0 && !feof(fp)) {
+		pr_perror("error encountered on file read");
+		return EXIT_FAILURE;
+	} else if (rd >= sizeof(imageData) - 1) {
+		pr_perror("config file too big");
 		return EXIT_FAILURE;
 	}
 
-	docker_destroy(docker);
-	} else {
-		fprintf(stderr, "ERROR: Failed to get get a docker client!\n");
-	}
-
-	image_config = yajl_tree_parse((const char *)loutput, errbuf, sizeof(errbuf));
-	if (image_config == NULL) {
+	image_node = yajl_tree_parse((const char *)imageData, errbuf, sizeof(errbuf));
+	if (image_node == NULL) {
 		pr_perror("parse_error: ");
 		if (strlen(errbuf)) {
 			pr_perror(" %s", errbuf);
@@ -150,8 +165,8 @@ char *image_inspect(const char *image) {
 		return EXIT_FAILURE;
 	}
 
-	const char *config_image[] = { "Config", (const char *)0 };
-	yajl_val v_iconfig = yajl_tree_get(image_config, config_image, yajl_t_object);
+	const char *config_image[] = { "config", (const char *)0 };
+	yajl_val v_iconfig = yajl_tree_get(image_node, config_image, yajl_t_object);
 	const char *image_configs[] = { "User", (const char *)0 };
 	yajl_val v_iuser = yajl_tree_get(v_iconfig, image_configs, yajl_t_string);
 	asprintf(&image_cs, "%s", YAJL_GET_STRING(v_iuser));
@@ -167,13 +182,14 @@ int prestart(const char *rootfs,
 		const char *id,
 		int pid,
 		const char *cPath,
-		const char *image,
+		char *image,
 		const char *cont_cu,
-		const char *mlabel) {
+		const char *mlabel,
+		const char *idriver) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
 
-	char *image_u = image_inspect(image);
+	char *image_u = image_inspect(image, idriver);
 
 	// bypass hook if passed uid matches image user
 	if (strcmp(image_u, cont_cu) == 0) {
@@ -247,7 +263,7 @@ int prestart(const char *rootfs,
 	
 	char *newPasswd = dest;
 	char *newPasswdNew = NULL;
-	const char *image_username = NULL;
+	char *image_username = NULL;
 	char line_storage[100], buffer[100];
 	int check, line_num = 1;
 	asprintf(&newPasswdNew, "%s/passwd", cPath);
@@ -436,6 +452,7 @@ int main(int argc, char *argv[]) {
 
 	char *cont_cu = NULL;
 	char **config_mounts = NULL;
+	char *idriver = NULL;
 	char *image = NULL;
 	char *mlabel = NULL;
 	unsigned config_mounts_len = 0;
@@ -446,7 +463,6 @@ int main(int argc, char *argv[]) {
 		/* Handle the Docker case here.  */
 		/* Extract values from the config json */
 		cPath = dirname(argv[2]);
-
 
 		/* Extract values from the config json */
 		const char *mount_points_path[] = { "MountPoints", (const char *)0 };
@@ -459,6 +475,13 @@ int main(int argc, char *argv[]) {
 		config_mounts = YAJL_GET_OBJECT(v_mps)->keys;
 		config_mounts_len = YAJL_GET_OBJECT(v_mps)->len;
 
+		const char *driver_type[] = { "Driver", (const char *)0 };
+		yajl_val v_driver = yajl_tree_get(config_node, driver_type, yajl_t_string);
+		if (!v_driver) {
+			pr_perror("Image not found in config");
+			return EXIT_FAILURE;
+		}
+		idriver = YAJL_GET_STRING(v_driver);
 
 		const char *image_path[] = { "Image", (const char *)0 };
 		yajl_val v_image = yajl_tree_get(config_node, image_path, yajl_t_string);
@@ -488,7 +511,7 @@ int main(int argc, char *argv[]) {
 		return EXIT_SUCCESS;
 	}
 
-	// bypass hook if passwd user is not numeric
+	// bypass hook if passed in user is not numeric
     if (atoi(cont_cu)==0){
 		return EXIT_SUCCESS;
 	}
@@ -496,7 +519,7 @@ int main(int argc, char *argv[]) {
 	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
 	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
-		if (prestart(rootfs, id, target_pid, cPath, image, cont_cu, mlabel) != 0) {
+		if (prestart(rootfs, id, target_pid, cPath, image, cont_cu, mlabel, idriver) != 0) {
             return EXIT_FAILURE;
 		}
 	} else if ((argc > 2 && !strcmp("poststop", argv[1])) || (target_pid == 0)) {

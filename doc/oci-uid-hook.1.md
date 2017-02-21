@@ -21,7 +21,5 @@ file and setting the disabled field to true.
 
 ## SEE ALSO
 
-docker-run(1)
-
 ## HISTORY
 February 2017, updated by Tommy Hughes <tohughes@redhat.com>

@@ -11,7 +11,7 @@
 Name:           oci-uid-hook
 Version:        0.0.1
 Release:        1.git%{shortcommit}%{?dist}
-Summary:        OCI uid hook for docker
+Summary:        OCI uid hook
 Group:          Applications/Text
 License:        GPLv3+
 URL:            https://%{provider_prefix}
