@@ -14,7 +14,6 @@
 #include <unistd.h>
 #include <errno.h>
 #include <inttypes.h>
-#include <libtar.h>
 #include <linux/limits.h>
 #include <selinux/selinux.h>
 #include <yajl/yajl_tree.h>

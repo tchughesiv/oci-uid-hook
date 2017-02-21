@@ -9,7 +9,6 @@ oci_uid_hook_CFLAGS += $(LIBMOUNT_CFLAGS)
 oci_uid_hook_LDADD += $(LIBMOUNT_LIBS)
 oci_uid_hook_CFLAGS += $(LIBCURL_CFLAGS)
 oci_uid_hook_LDADD += $(LIBCURL_LIBS)
-oci_uid_hook_LDADD += -ltar
 
 dist_man_MANS = oci-uid-hook.1
 EXTRA_DIST = README.md LICENSE
