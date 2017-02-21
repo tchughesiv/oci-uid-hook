@@ -1,5 +1,4 @@
 # OCI Uid Hook
-[![Go Report Card](https://goreportcard.com/badge/github.com/tchughesiv/oci-uid-hook)](https://goreportcard.com/report/github.com/tchughesiv/oci-uid-hook)
 
 ### Status: pre-alpha
 
@@ -26,8 +25,19 @@ The hook detects when an arbitrary uid is passed at container runtime and modifi
  - the specified 'uid' does not already exist in /etc/passwd
  
 ### Tested w/ the following on RHEL7 -
+
 ```json
 "docker API version": 1.24
 "docker Version": 1.12.5
 "runc version": 1.0.0-rc2
+```
+
+To build, install, clean-up:
+
+### 
+```shell
+autoreconf -i
+./configure --libexecdir=/usr/libexec/oci/hooks.d
+make
+make install
 ```
