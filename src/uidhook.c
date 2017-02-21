@@ -26,15 +26,6 @@
 #define DOCKER_CONTAINER "docker"
 #define ETC_PASSWD "/etc/passwd"
 
-static unsigned long get_mem_total() {
-	struct sysinfo info;
-	int ret = sysinfo(&info);
-	if (ret < 0) {
-		return ret;
-	}
-	return info.totalram;
-}
-
 #define _cleanup_(x) __attribute__((cleanup(x)))
 
 static inline void freep(void *p) {
@@ -86,18 +77,19 @@ DEFINE_CLEANUP_FUNC(yajl_val, yajl_tree_free)
 #define BUFLEN 1024
 #define CONFIGSZ 65536
 
-static int makepath(char *dir, mode_t mode) {
-    if (!dir) {
-	errno = EINVAL;
-	return -1;
-    }
+char *replace_str(char *str, char *orig, char *rep) {
+  static char buffer[4096];
+  char *p;
 
-    if (strlen(dir) == 1 && dir[0] == '/')
-	return 0;
+  if(!(p = strstr(str, orig)))  // Is 'orig' even in 'str'?
+    return str;
 
-    makepath(dirname(strdupa(dir)), mode);
+  strncpy(buffer, str, p-str); // Copy characters from 'str' start to 'orig' st$
+  buffer[p-str] = '\0';
 
-    return mkdir(dir, mode);
+  sprintf(buffer+(p-str), "%s%s", rep, p+strlen(orig));
+
+  return buffer;
 }
 
 static int bind_mount(const char *src, const char *dest, int readonly) {
@@ -115,58 +107,6 @@ static int bind_mount(const char *src, const char *dest, int readonly) {
 	return 0;
 }
 
-/* error callback */
-static int parser_errcb(struct libmnt_table *tb __attribute__ ((__unused__)),
-			const char *filename, int line) {
-	pr_perror("%s: parse error at line %d", filename, line);
-	return 0;
-}
-
-static struct libmnt_table *parse_tabfile(const char *path) {
-	int rc;
-	struct libmnt_table *tb = mnt_new_table();
-
-	if (!tb) {
-		pr_perror("failed to initialize libmount table");
-		return NULL;
-	}
-
-	mnt_table_set_parser_errcb(tb, parser_errcb);
-
-	rc = mnt_table_parse_file(tb, path);
-
-	if (rc) {
-		mnt_free_table(tb);
-		pr_perror("can't read %s", path);
-		return NULL;
-	}
-	return tb;
-}
-
-/*
- * Get the contents of the file specified by its path
- */
-static char *get_file_contents(const char *path) {
-	_cleanup_close_ int fd = -1;
-	if ((fd = open(path, O_RDONLY)) == -1) {
-		pr_perror("Failed to open file for reading");
-		return NULL;
-	}
-
-	char buffer[256];
-	ssize_t rd;
-	rd = read(fd, buffer, 256);
-	if (rd == -1) {
-		pr_perror("Failed to read file contents");
-		return NULL;
-	}
-
-	buffer[rd] = '\0';
-
-	return strdup(buffer);
-}
-
-
 static bool contains_mount(const char **config_mounts, unsigned len, const char *mount) {
 	for (unsigned i = 0; i < len; i++) {
 		if (!strcmp(mount, config_mounts[i])) {
@@ -175,122 +115,6 @@ static bool contains_mount(const char **config_mounts, unsigned len, const char 
 		}
 	}
 	return false;
-}
-
-/*
- * Move specified mount to temporary directory
- */
-static int move_mount_to_tmp(const char *rootfs, const char *tmp_dir, const char *mount_dir, int offset) {
-	int rc;
-	_cleanup_free_ char *src = NULL;
-	_cleanup_free_ char *dest = NULL;
-	_cleanup_free_ char *post = NULL;
-
-	rc = asprintf(&src, "%s/%s", rootfs, mount_dir);
-	if (rc < 0) {
-		pr_perror("Failed to allocate memory for src");
-		return -1;
-	}
-
-	/* Find the second '/' to get the postfix */
-	post = strdup(&mount_dir[offset]);
-
-	if (!post) {
-		pr_perror("Failed to allocate memory for postfix");
-		return -1;
-	}
-
-	rc = asprintf(&dest, "%s/%s", tmp_dir, post);
-	if (rc < 0) {
-		pr_perror("Failed to allocate memory for dest");
-		return -1;
-	}
-
-	if (makepath(dest, 0755) == -1) {
-		if (errno != EEXIST) {
-			pr_perror("Failed to mkdir new dest: %s", dest);
-			return -1;
-		}
-	}
-
-	/* Move the mount to temporary directory */
-	if ((mount(src, dest, "", MS_MOVE, "") == -1)) {
-		pr_perror("Failed to move mount %s to %s", src, dest);
-		return -1;
-	}
-
-	return 0;
-}
-
-static int move_mounts(const char *rootfs,
-		       const char *path,
-		       const char **config_mounts,
-		       unsigned config_mounts_len,
-		       char *options
-	) {
-
-	char mount_dir[PATH_MAX];
-	snprintf(mount_dir, PATH_MAX, "%s%s", rootfs, path);
-
-	/* Create a temporary directory to move the PATH mounts to */
-	char temp_template[] = "/tmp/ocitmp.XXXXXX";
-
-	char *tmp_dir = mkdtemp(temp_template);
-	if (tmp_dir == NULL) {
-		pr_perror("Failed to create temporary directory for mounts");
-		return -1;
-	}
-
-	/* Create the PATH directory */
-	if (!contains_mount(config_mounts, config_mounts_len, path)) {
-		if (mkdir(mount_dir, 0755) == -1) {
-			if (errno != EEXIST) {
-				pr_perror("Failed to mkdir: %s", mount_dir);
-				return -1;
-			}
-		}
-
-		/* Mount tmpfs at new temp directory */
-		if (mount("tmpfs", tmp_dir, "tmpfs", MS_NODEV|MS_NOSUID, options) == -1) {
-			pr_perror("Failed to mount tmpfs at %s", tmp_dir);
-			return -1;
-		}
-
-		/* Special case for /run/secrets which will not be in the
-		   config_mounts */
-		if (strcmp("/run", path) == 0) {
-			if (move_mount_to_tmp(rootfs, tmp_dir, "/run/secrets", strlen(path)) < 0) {
-				if (errno != EINVAL && errno != ENOENT) {
-					pr_perror("Failed to move secrets dir");
-					return -1;
-				}
-			}
-		}
-
-		/* Move other user specified mounts under PATH to temporary directory */
-		for (unsigned i = 0; i < config_mounts_len; i++) {
-			/* Match destinations that begin with PATH */
-			if (!strncmp(path, config_mounts[i], strlen(path))) {
-				if (move_mount_to_tmp(rootfs, tmp_dir, config_mounts[i], strlen(path)) < 0) {
-					pr_perror("Failed to move %s to %s", config_mounts[i], tmp_dir);
-					return -1;
-				}
-			}
-		}
-
-		/* Move temporary directory to PATH */
-		if ((mount(tmp_dir, mount_dir, "", MS_MOVE, "") == -1)) {
-			pr_perror("Failed to move mount %s to %s", tmp_dir, mount_dir);
-			return -1;
-		}
-	}
-
-	/* Remove the temp directory for PATH */
-	if (rmdir(tmp_dir) < 0) {
-		pr_perror("Failed to remove %s", tmp_dir);
-		return -1;
-	}
-	return 0;
 }
 
 char *image_inspect(const char *image) {
@@ -349,7 +173,6 @@ int passwdfile_retrieval(const char *image, const char *cPath) {
 	const char *newPasswd = NULL;
 	const char *newPasswdTar = NULL;
 	const char *newCpath = NULL;
-	char *c_id = NULL;
 
 	asprintf(&url, "http://%s/containers/create", DOCKER_API_VERSION);
 	asprintf(&post, "{\"Image\":\"%s\"}", image);
@@ -416,27 +239,9 @@ int passwdfile_retrieval(const char *image, const char *cPath) {
 	return 0;
 }
 
-char *replace_str(char *str, char *orig, char *rep) {
-  static char buffer[4096];
-  char *p;
-
-  if(!(p = strstr(str, orig)))  // Is 'orig' even in 'str'?
-    return str;
-
-  strncpy(buffer, str, p-str); // Copy characters from 'str' start to 'orig' st$
-  buffer[p-str] = '\0';
-
-  sprintf(buffer+(p-str), "%s%s", rep, p+strlen(orig));
-
-  return buffer;
-}
-
 int prestart(const char *rootfs,
 		const char *id,
 		int pid,
-		const char *mount_label,
-		const char **config_mounts,
-		unsigned config_mounts_len,
 		const char *cPath,
 		const char *image,
 		const char *cont_cu) {
@@ -488,7 +293,6 @@ int prestart(const char *rootfs,
 		if(check == 1) {
 			char *image_un = strtok(buffer,":");
 			asprintf(&image_username, "%s", image_un);
-			pr_pinfo("username = %s", image_username);
 		}
 		line_num++;
 	}
@@ -501,7 +305,6 @@ int prestart(const char *rootfs,
 	char *i_user_r = NULL;
 	asprintf(&i_user_s, "%s:x:%s:", image_username, image_u);
 	asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
-	pr_pinfo("%s", i_user_s);
 	pr_pinfo("%s", i_user_r);
 	while( fgets(line_storage, sizeof(line_storage), input3) != NULL )  {
 		check = 0;
@@ -529,7 +332,6 @@ int prestart(const char *rootfs,
 
 	pr_pinfo("%s", newPasswd);
 
-	int rc = -1;
 	char process_mnt_ns_fd[PATH_MAX];
 	snprintf(process_mnt_ns_fd, PATH_MAX, "/proc/%d/ns/mnt", pid);
 
@@ -595,18 +397,17 @@ int prestart(const char *rootfs,
 	/*
 	Ensure we've entered container mnt namespace before bind mount of /etc/passwd.
 	*/
-	if ((strcmp(self_v, proc_v) != 0) || (strcmp(proc_v, ns_v) == 0)) {
-		pr_pdebug("mnt setns successful - %s", ns_v);
+	if ((strcmp(self_v, proc_v) != 0) && (strcmp(proc_v, ns_v) == 0)) {
+		// bind mount /etc/passwd
+		char dest[PATH_MAX];
+		snprintf(dest, PATH_MAX, "%s%s", rootfs, ETC_PASSWD);
+
+		if (bind_mount(newPasswd, dest, false) < 0) {
+			return -1;
+		}
 	} else {
+		// how better error out w/o throwing oci errors? 
 		return EXIT_FAILURE;
-	}
-
-	// bind mount /etc/passwd
-	char dest[PATH_MAX];
-	snprintf(dest, PATH_MAX, "%s%s", rootfs, ETC_PASSWD);
-
-	if (bind_mount(newPasswd, dest, false) < 0) {
-		return -1;
 	}
 
 	pr_pinfo("docker exec %s whoami", id);
@@ -717,11 +518,9 @@ int main(int argc, char *argv[]) {
 		return EXIT_FAILURE;
 	}
 
-	char *cmd = NULL;
-	char *image = NULL;
-	char *mount_label = NULL;
 	const char *cont_cu = NULL;
 	const char **config_mounts = NULL;
+	const char *image = NULL;
 	unsigned config_mounts_len = 0;
 
 	if (!docker) {
@@ -731,13 +530,6 @@ int main(int argc, char *argv[]) {
 		/* Extract values from the config json */
 		cPath = dirname(argv[2]);
 
-		const char *mount_label_path[] = { "MountLabel", (const char *)0 };
-		yajl_val v_mount = yajl_tree_get(config_node, mount_label_path, yajl_t_string);
-		if (!v_mount) {
-			pr_perror("MountLabel not found in config");
-			return EXIT_FAILURE;
-		}
-		mount_label = YAJL_GET_STRING(v_mount);
 
 		/* Extract values from the config json */
 		const char *mount_points_path[] = { "MountPoints", (const char *)0 };
@@ -750,13 +542,6 @@ int main(int argc, char *argv[]) {
 		config_mounts = YAJL_GET_OBJECT(v_mps)->keys;
 		config_mounts_len = YAJL_GET_OBJECT(v_mps)->len;
 
-		const char *cmd_path[] = { "Path", (const char *)0 };
-		yajl_val v_cmd = yajl_tree_get(config_node, cmd_path, yajl_t_string);
-		if (!v_cmd) {
-			pr_perror("Path not found in config");
-			return EXIT_FAILURE;
-		}
-		cmd = YAJL_GET_STRING(v_cmd);
 
 		const char *image_path[] = { "Image", (const char *)0 };
 		yajl_val v_image = yajl_tree_get(config_node, image_path, yajl_t_string);
@@ -786,7 +571,7 @@ int main(int argc, char *argv[]) {
 	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
 	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
-		if (prestart(rootfs, id, target_pid, mount_label, config_mounts, config_mounts_len, cPath, image, cont_cu) != 0) {
+		if (prestart(rootfs, id, target_pid, cPath, image, cont_cu) != 0) {
             return EXIT_FAILURE;
 		}
 	} else if ((argc > 2 && !strcmp("poststop", argv[1])) || (target_pid == 0)) {
