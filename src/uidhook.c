@@ -15,9 +15,12 @@
 #include <errno.h>
 #include <inttypes.h>
 #include <linux/limits.h>
-#include <selinux/selinux.h>
 #include <yajl/yajl_tree.h>
 #include <libmount/libmount.h>
+
+#ifdef HAVE_SELINUX
+#include <selinux/selinux.h>
+#endif
 
 #include "config.h"
 
@@ -189,7 +192,7 @@ int prestart(const char *rootfs,
 	if (image_u == NULL) {
 		return EXIT_FAILURE;
 	}
-	
+
 	// bypass hook if passed uid matches image user
 	if (strcmp(image_u, cont_cu) == 0) {
 		return EXIT_SUCCESS;
@@ -321,12 +324,15 @@ int prestart(const char *rootfs,
 	fclose(inputnew);
 
 	if (strcmp(mlabel, "") != 0) {
+		#ifdef HAVE_SELINUX
 		if (setfilecon (newPasswdNew, mlabel) < 0) {
 			pr_perror("Failed to set context %s on %s", newPasswdNew, mlabel);
 		}
+		#endif
 	}
+
 	chmod(newPasswdNew, 0644);
-	pr_pinfo("%s", newPasswdNew);
+	pr_pdebug("%s", newPasswdNew);
 
 	/*
 	Ensure we've entered container mnt namespace before bind mount of /etc/passwd.
@@ -342,7 +348,7 @@ int prestart(const char *rootfs,
 		return EXIT_FAILURE;
 	}
 
-	pr_pinfo("docker exec %s whoami", id);
+	pr_pdebug("docker exec %s whoami", id);
 	return EXIT_SUCCESS;
 }
 
