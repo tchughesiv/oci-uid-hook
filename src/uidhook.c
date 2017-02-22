@@ -21,7 +21,6 @@
 
 #include "config.h"
 
-#define DOCKER_CONTAINER "docker"
 #define ETC_PASSWD "/etc/passwd"
 
 #define _cleanup_(x) __attribute__((cleanup(x)))
@@ -140,15 +139,15 @@ char *image_inspect(char *image, const char *idriver) {
 	/* Parse the config file */
 	if (fp == NULL) {
 		pr_perror("Failed to open config file: %s", image_json);
-		return EXIT_FAILURE;
+		return NULL;
 	}
 	rd = fread((void *)imageData, 1, sizeof(imageData) - 1, fp);
 	if (rd == 0 && !feof(fp)) {
 		pr_perror("error encountered on file read");
-		return EXIT_FAILURE;
+		return NULL;
 	} else if (rd >= sizeof(imageData) - 1) {
 		pr_perror("config file too big");
-		return EXIT_FAILURE;
+		return NULL;
 	}
 
 	image_node = yajl_tree_parse((const char *)imageData, errbuf, sizeof(errbuf));
@@ -159,7 +158,7 @@ char *image_inspect(char *image, const char *idriver) {
 		} else {
 			pr_perror("unknown error");
 		}
-		return EXIT_FAILURE;
+		return NULL;
 	}
 
 	const char *config_image[] = { "config", (const char *)0 };
@@ -178,16 +177,19 @@ char *image_inspect(char *image, const char *idriver) {
 int prestart(const char *rootfs,
 		const char *id,
 		int pid,
-		const char *cPath,
 		char *image,
 		const char *cont_cu,
 		const char *mlabel,
-		const char *idriver) {
+		const char *idriver,
+		const char *bp) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
 
 	char *image_u = image_inspect(image, idriver);
-
+	if (image_u == NULL) {
+		return EXIT_FAILURE;
+	}
+	
 	// bypass hook if passed uid matches image user
 	if (strcmp(image_u, cont_cu) == 0) {
 		return EXIT_SUCCESS;
@@ -195,12 +197,6 @@ int prestart(const char *rootfs,
 
 	char process_mnt_ns_fd[PATH_MAX];
 	snprintf(process_mnt_ns_fd, PATH_MAX, "/proc/%d/ns/mnt", pid);
-
-	fd = open(process_mnt_ns_fd, O_RDONLY);
-	if (fd < 0) {
-		pr_pinfo("Failed to open mnt namespace fd %s", process_mnt_ns_fd);
-		return -1;
-	}
 
 	char *pch;
 	char *self_v;
@@ -226,6 +222,12 @@ int prestart(const char *rootfs,
 		if (pchproc != NULL) {
 			proc_v = pchproc;
 		}
+	}
+
+	fd = open(process_mnt_ns_fd, O_RDONLY);
+	if (fd < 0) {
+		pr_pinfo("Failed to open mnt namespace fd %s", process_mnt_ns_fd);
+		return -1;
 	}
 
 	/* Join the mount namespace of the target process */
@@ -263,7 +265,7 @@ int prestart(const char *rootfs,
 	char *image_username = NULL;
 	char line_storage[100], buffer[100];
 	int check, line_num = 1;
-	asprintf(&newPasswdNew, "%s/passwd", cPath);
+	asprintf(&newPasswdNew, "%s/passwd", bp);
 	
 	// bypass hook, existing user name matches specified uid
 	FILE *input = fopen(newPasswd, "r");
@@ -318,9 +320,11 @@ int prestart(const char *rootfs,
 	fclose(input3);
 	fclose(inputnew);
 
-	char *chcon_command = NULL;
-	asprintf(&chcon_command, "chcon %s %s", mlabel, newPasswdNew);
-	system(chcon_command);
+	if (strcmp(mlabel, "") != 0) {
+		if (setfilecon (newPasswdNew, mlabel) < 0) {
+			pr_perror("Failed to set context %s on %s", newPasswdNew, mlabel);
+		}
+	}
 	chmod(newPasswdNew, 0644);
 	pr_pinfo("%s", newPasswdNew);
 
@@ -346,12 +350,16 @@ int main(int argc, char *argv[]) {
 	size_t rd;
 	_cleanup_(yajl_tree_freep) yajl_val node = NULL;
 	_cleanup_(yajl_tree_freep) yajl_val config_node = NULL;
+	_cleanup_fclose_ FILE *fp = NULL;
 	char errbuf[BUFLEN];
 	char stateData[CONFIGSZ];
 	char configData[CONFIGSZ];
-	char *cPath;
-	_cleanup_fclose_ FILE *fp = NULL;
-	bool docker = false;
+	char *cont_cu = NULL;
+	char **config_mounts = NULL;
+	char *idriver = NULL;
+	char *image = NULL;
+	char *mlabel = NULL;
+	unsigned config_mounts_len = 0;
 
 	stateData[0] = 0;
 	errbuf[0] = 0;
@@ -403,62 +411,48 @@ int main(int argc, char *argv[]) {
 	}
 	char *id = YAJL_GET_STRING(v_id);
 
-	const char *ctr = getenv("container");
-	if (ctr && !strncmp(ctr, DOCKER_CONTAINER, strlen(DOCKER_CONTAINER))) {
-		docker = true;
+	const char *bundle_path[] = { "bundlePath", (const char *)0 };
+	yajl_val v_bundle_path = yajl_tree_get(node, bundle_path, yajl_t_string);
+	if (!v_bundle_path) {
+		pr_perror("bundlePath not found in state");
+		return EXIT_FAILURE;
 	}
+	char *bp = YAJL_GET_STRING(v_bundle_path);
+	char config_file_name[PATH_MAX];
+	sprintf(config_file_name, "%s/config.json", bp);
 
-	if (docker) {
-		if (argc < 3) {
-			pr_perror("cannot find config file to use");
+
+	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
+	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
+	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
+
+		// fp = fopen(config_file_name, "r");
+		fp = fopen(argv[2], "r");
+
+		/* Parse the config file */
+		if (fp == NULL) {
+			pr_perror("Failed to open config file: %s", argv[2]);
 			return EXIT_FAILURE;
 		}
-		fp = fopen(argv[2], "r");
-	} else {
-		/* bundle_path must be specified for the OCI hooks, and from there we read the configuration file.
-		   If it is not specified, then check that it is specified on the command line.  */
-		return EXIT_FAILURE;
-	}
-
-
-	/* Parse the config file */
-	if (fp == NULL) {
-		pr_perror("Failed to open config file: %s", argv[2]);
-		return EXIT_FAILURE;
-	}
-	rd = fread((void *)configData, 1, sizeof(configData) - 1, fp);
-	if (rd == 0 && !feof(fp)) {
-		pr_perror("error encountered on file read");
-		return EXIT_FAILURE;
-	} else if (rd >= sizeof(configData) - 1) {
-		pr_perror("config file too big");
-		return EXIT_FAILURE;
-	}
-
-	config_node = yajl_tree_parse((const char *)configData, errbuf, sizeof(errbuf));
-	if (config_node == NULL) {
-		pr_perror("parse_error: ");
-		if (strlen(errbuf)) {
-			pr_perror(" %s", errbuf);
-		} else {
-			pr_perror("unknown error");
+		rd = fread((void *)configData, 1, sizeof(configData) - 1, fp);
+		if (rd == 0 && !feof(fp)) {
+			pr_perror("error encountered on file read");
+			return EXIT_FAILURE;
+		} else if (rd >= sizeof(configData) - 1) {
+			pr_perror("config file too big");
+			return EXIT_FAILURE;
 		}
-		return EXIT_FAILURE;
-	}
 
-	char *cont_cu = NULL;
-	char **config_mounts = NULL;
-	char *idriver = NULL;
-	char *image = NULL;
-	char *mlabel = NULL;
-	unsigned config_mounts_len = 0;
-
-	if (!docker) {
-		return EXIT_FAILURE;
-	} else {
-		/* Handle the Docker case here.  */
-		/* Extract values from the config json */
-		cPath = dirname(argv[2]);
+		config_node = yajl_tree_parse((const char *)configData, errbuf, sizeof(errbuf));
+		if (config_node == NULL) {
+			pr_perror("parse_error: ");
+			if (strlen(errbuf)) {
+				pr_perror(" %s", errbuf);
+			} else {
+				pr_perror("unknown error");
+			}
+			return EXIT_FAILURE;
+		}
 
 		/* Extract values from the config json */
 		const char *mount_points_path[] = { "MountPoints", (const char *)0 };
@@ -495,29 +489,27 @@ int main(int argc, char *argv[]) {
 		}
 		mlabel = YAJL_GET_STRING(v_label);
 
+		// process.user.uid
 		const char *config_cont[] = { "Config", (const char *)0 };
 		yajl_val v_config = yajl_tree_get(config_node, config_cont, yajl_t_object);
 		const char *cont_configs[] = { "User", (const char *)0 };
 		yajl_val v_cuser = yajl_tree_get(v_config, cont_configs, yajl_t_string);
 		asprintf(&cont_cu, "%s", YAJL_GET_STRING(v_cuser));
-	}
 
-	// bypass hook if /etc/passwd already bind mounted
-	if (contains_mount(config_mounts, config_mounts_len, ETC_PASSWD)) {
-		return EXIT_SUCCESS;
-	}
 
-	// bypass hook if passed in user is not numeric
-    if (atoi(cont_cu)==0){
-		return EXIT_SUCCESS;
-	}
+		// bypass hook if /etc/passwd already bind mounted
+		if (contains_mount(config_mounts, config_mounts_len, ETC_PASSWD)) {
+			return EXIT_SUCCESS;
+		}
+		// bypass hook if passed in user is not numeric
+		if (atoi(cont_cu)==0){
+			return EXIT_SUCCESS;
+		}
 
-	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
-	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
-	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
-		if (prestart(rootfs, id, target_pid, cPath, image, cont_cu, mlabel, idriver) != 0) {
+		if (prestart(rootfs, id, target_pid, image, cont_cu, mlabel, idriver, bp) != 0) {
             return EXIT_FAILURE;
 		}
+
 	} else if ((argc > 2 && !strcmp("poststop", argv[1])) || (target_pid == 0)) {
         return EXIT_SUCCESS;
 	} else {
