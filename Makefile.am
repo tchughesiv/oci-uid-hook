@@ -7,8 +7,6 @@ oci_uid_hook_CFLAGS += $(SELINUX_CFLAGS)
 oci_uid_hook_LDADD += $(SELINUX_LIBS)
 oci_uid_hook_CFLAGS += $(LIBMOUNT_CFLAGS)
 oci_uid_hook_LDADD += $(LIBMOUNT_LIBS)
-oci_uid_hook_CFLAGS += $(LIBCURL_CFLAGS)
-oci_uid_hook_LDADD += $(LIBCURL_LIBS)
 
 dist_man_MANS = oci-uid-hook.1
 EXTRA_DIST = README.md LICENSE

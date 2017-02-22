@@ -21,7 +21,6 @@
 
 #include "config.h"
 
-// #define DOCKER_CONTAINER "docker"
 #define ETC_PASSWD "/etc/passwd"
 
 #define _cleanup_(x) __attribute__((cleanup(x)))
@@ -140,15 +139,15 @@ char *image_inspect(char *image, const char *idriver) {
 	/* Parse the config file */
 	if (fp == NULL) {
 		pr_perror("Failed to open config file: %s", image_json);
-		return EXIT_FAILURE;
+		return NULL;
 	}
 	rd = fread((void *)imageData, 1, sizeof(imageData) - 1, fp);
 	if (rd == 0 && !feof(fp)) {
 		pr_perror("error encountered on file read");
-		return EXIT_FAILURE;
+		return NULL;
 	} else if (rd >= sizeof(imageData) - 1) {
 		pr_perror("config file too big");
-		return EXIT_FAILURE;
+		return NULL;
 	}
 
 	image_node = yajl_tree_parse((const char *)imageData, errbuf, sizeof(errbuf));
@@ -159,7 +158,7 @@ char *image_inspect(char *image, const char *idriver) {
 		} else {
 			pr_perror("unknown error");
 		}
-		return EXIT_FAILURE;
+		return NULL;
 	}
 
 	const char *config_image[] = { "config", (const char *)0 };
@@ -187,7 +186,10 @@ int prestart(const char *rootfs,
 	_cleanup_free_   char *options = NULL;
 
 	char *image_u = image_inspect(image, idriver);
-
+	if (image_u == NULL) {
+		return EXIT_FAILURE;
+	}
+	
 	// bypass hook if passed uid matches image user
 	if (strcmp(image_u, cont_cu) == 0) {
 		return EXIT_SUCCESS;
@@ -195,12 +197,6 @@ int prestart(const char *rootfs,
 
 	char process_mnt_ns_fd[PATH_MAX];
 	snprintf(process_mnt_ns_fd, PATH_MAX, "/proc/%d/ns/mnt", pid);
-
-	fd = open(process_mnt_ns_fd, O_RDONLY);
-	if (fd < 0) {
-		pr_pinfo("Failed to open mnt namespace fd %s", process_mnt_ns_fd);
-		return -1;
-	}
 
 	char *pch;
 	char *self_v;
@@ -226,6 +222,12 @@ int prestart(const char *rootfs,
 		if (pchproc != NULL) {
 			proc_v = pchproc;
 		}
+	}
+
+	fd = open(process_mnt_ns_fd, O_RDONLY);
+	if (fd < 0) {
+		pr_pinfo("Failed to open mnt namespace fd %s", process_mnt_ns_fd);
+		return -1;
 	}
 
 	/* Join the mount namespace of the target process */
@@ -318,7 +320,7 @@ int prestart(const char *rootfs,
 	fclose(input3);
 	fclose(inputnew);
 
-	if (mlabel != "") {
+	if (strcmp(mlabel, "") != 0) {
 		if (setfilecon (newPasswdNew, mlabel) < 0) {
 			pr_perror("Failed to set context %s on %s", newPasswdNew, mlabel);
 		}
@@ -357,7 +359,6 @@ int main(int argc, char *argv[]) {
 	char *idriver = NULL;
 	char *image = NULL;
 	char *mlabel = NULL;
-	bool docker = false;
 	unsigned config_mounts_len = 0;
 
 	stateData[0] = 0;
@@ -410,14 +411,12 @@ int main(int argc, char *argv[]) {
 	}
 	char *id = YAJL_GET_STRING(v_id);
 
-	const char *bundlePath[] = { "bundlePath", (const char *)0 };
-	yajl_val v_bp = yajl_tree_get(node, bundlePath, yajl_t_string);
-	if (!v_bp) {
-		pr_perror("id not found in state");
-		return EXIT_FAILURE;
-	}
 	const char *bundle_path[] = { "bundlePath", (const char *)0 };
 	yajl_val v_bundle_path = yajl_tree_get(node, bundle_path, yajl_t_string);
+	if (!v_bundle_path) {
+		pr_perror("bundlePath not found in state");
+		return EXIT_FAILURE;
+	}
 	char *bp = YAJL_GET_STRING(v_bundle_path);
 	char config_file_name[PATH_MAX];
 	sprintf(config_file_name, "%s/config.json", bp);
