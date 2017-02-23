@@ -8,13 +8,12 @@ AC_USE_SYSTEM_EXTENSIONS
 AC_SYS_LARGEFILE
 
 PKG_CHECK_MODULES([YAJL], [yajl >= 2.0.0])
-PKG_CHECK_MODULES([SELINUX], [libselinux >= 2.0.0])
 PKG_CHECK_MODULES([LIBMOUNT], [mount >= 2.23.0])
 
 have_selinux=no
 AC_ARG_ENABLE(selinux, AS_HELP_STRING([--disable-selinux], [disable optional SELINUX support]))
 if test "x$enable_selinux" != "xno"; then
-        PKG_CHECK_MODULES([SELINUX], [libselinux >= 2.1.9],
+        PKG_CHECK_MODULES([SELINUX], [libselinux >= 2.0.0],
                 [AC_DEFINE(HAVE_SELINUX, 1, [Define if SELinux is available])
                  have_selinux=yes
                  M4_DEFINES="$M4_DEFINES -DHAVE_SELINUX"],
