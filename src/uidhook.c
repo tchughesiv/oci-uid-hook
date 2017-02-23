@@ -184,7 +184,8 @@ int prestart(const char *rootfs,
 		const char *cont_cu,
 		const char *mlabel,
 		const char *idriver,
-		const char *bp) {
+		const char *bp,
+		char *cPath) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
 
@@ -268,7 +269,7 @@ int prestart(const char *rootfs,
 	char *image_username = NULL;
 	char line_storage[100], buffer[100];
 	int check, line_num = 1;
-	asprintf(&newPasswdNew, "%s/passwd", bp);
+	asprintf(&newPasswdNew, "%s/passwd", cPath);
 	
 	// bypass hook, existing user name matches specified uid
 	FILE *input = fopen(newPasswd, "r");
@@ -365,6 +366,7 @@ int main(int argc, char *argv[]) {
 	char *idriver = NULL;
 	char *image = NULL;
 	char *mlabel = NULL;
+	char *cPath;
 	unsigned config_mounts_len = 0;
 
 	stateData[0] = 0;
@@ -431,7 +433,6 @@ int main(int argc, char *argv[]) {
 	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
 	if ((argc > 2 && !strcmp("prestart", argv[1])) || target_pid) {
-
 		// fp = fopen(config_file_name, "r");
 		fp = fopen(argv[2], "r");
 
@@ -502,7 +503,6 @@ int main(int argc, char *argv[]) {
 		yajl_val v_cuser = yajl_tree_get(v_config, cont_configs, yajl_t_string);
 		asprintf(&cont_cu, "%s", YAJL_GET_STRING(v_cuser));
 
-
 		// bypass hook if /etc/passwd already bind mounted
 		if (contains_mount(config_mounts, config_mounts_len, ETC_PASSWD)) {
 			return EXIT_SUCCESS;
@@ -512,7 +512,8 @@ int main(int argc, char *argv[]) {
 			return EXIT_SUCCESS;
 		}
 
-		if (prestart(rootfs, id, target_pid, image, cont_cu, mlabel, idriver, bp) != 0) {
+		cPath = dirname(argv[2]);
+		if (prestart(rootfs, id, target_pid, image, cont_cu, mlabel, idriver, bp, cPath) != 0) {
             return EXIT_FAILURE;
 		}
 
