@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <libgen.h>
 #include <stdlib.h>
+#include <inttypes.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <string.h>
 #include <sys/mount.h>
@@ -13,7 +15,7 @@
 #include <sched.h>
 #include <unistd.h>
 #include <errno.h>
-#include <inttypes.h>
+#include <pwd.h>
 #include <linux/limits.h>
 #include <yajl/yajl_tree.h>
 #include <libmount/libmount.h>
@@ -177,6 +179,22 @@ char *image_inspect(char *image, const char *idriver) {
 	return image_cs;
 }
 
+struct passwd *fgetpwnam(FILE *pw_file,char *name) {
+	struct passwd *ret;
+	while ((ret=fgetpwent(pw_file))!=NULL) {
+		if(strcmp(ret->pw_name,name)==0) break;
+	}
+	return(ret);
+}
+
+struct passwd *fgetpwuid(FILE *pw_file,uid_t uid) {
+	struct passwd *ret;
+	while ((ret=fgetpwent(pw_file))!=NULL) {
+		if (ret->pw_uid == uid) break;
+	}
+	return(ret);
+}
+
 int prestart(const char *rootfs,
 		const char *id,
 		int pid,
@@ -263,53 +281,50 @@ int prestart(const char *rootfs,
 
 	char dest[PATH_MAX];
 	snprintf(dest, PATH_MAX, "%s%s", rootfs, ETC_PASSWD);
-	
 	char *newPasswd = dest;
 	char *newPasswdNew = NULL;
 	char *image_username = NULL;
+	char *image_id = NULL;
+	char *group_id = NULL;
 	char line_storage[100], buffer[100];
 	int check, line_num = 1;
-	asprintf(&newPasswdNew, "%s/passwd", cPath);
-	
-	// bypass hook, existing user name matches specified uid
-	FILE *input = fopen(newPasswd, "r");
-	char *c_user_search = NULL;
-	asprintf(&c_user_search, ":x:%s:", cont_cu);
-	while( fgets(line_storage, sizeof(line_storage), input) != NULL )  {
-		check = 0;
-		sscanf(line_storage,"%s",buffer);
-		if(strstr(buffer,c_user_search) != NULL)  check = 1;
-		if(check == 1) {
-			remove(newPasswd);
-			fclose(input);
+	FILE *pwd_fd = NULL;
+
+	// bypass hook if user exists with specified uid
+	pwd_fd = fopen(newPasswd, "r");
+	if (isdigit(cont_cu[0])) {
+		uid_t uid = atoi(cont_cu);
+		struct passwd *pwd = fgetpwuid(pwd_fd, uid);
+		if (pwd != 0) {
 			return EXIT_SUCCESS;
 		}
-		line_num++;
 	}
-	fclose(input);
+	fclose(pwd_fd);
 
-	FILE *input2 = fopen(newPasswd, "r");
-	char *i_user_search = NULL;
-	asprintf(&i_user_search, ":x:%s:", image_u);
-	while( fgets(line_storage, sizeof(line_storage), input2) != NULL )  {
-		check = 0;
-		sscanf(line_storage,"%s",buffer);
-		if(strstr(buffer,i_user_search) != NULL)  check = 1;
-		if(check == 1) {
-			char *image_un = strtok(buffer,":");
-			asprintf(&image_username, "%s", image_un);
-		}
-		line_num++;
+	// get user details from container passwd file
+	pwd_fd = fopen(newPasswd, "r");
+	if (isdigit(image_u[0])) {
+		uid_t uid = atoi(image_u);
+		struct passwd *pwd = fgetpwuid(pwd_fd, uid);
+		asprintf(&image_username, "%s", pwd->pw_name);
+		asprintf(&image_id, "%d", pwd->pw_uid);
+		asprintf(&group_id, "%d", pwd->pw_gid);
+	} else {
+		struct passwd *pwd = fgetpwnam(pwd_fd, image_u);
+		asprintf(&image_username, "%s", pwd->pw_name);
+		asprintf(&image_id, "%d", pwd->pw_uid);
+		asprintf(&group_id, "%d", pwd->pw_gid);
 	}
-	fclose(input2);
+	fclose(pwd_fd);
 
-	FILE *input3 = fopen(newPasswd, "r");
+	asprintf(&newPasswdNew, "%s/passwd", cPath);
+	FILE *input = fopen(newPasswd, "r");
 	FILE *inputnew = fopen(newPasswdNew, "w");
 	char *i_user_s = NULL;
 	char *i_user_r = NULL;
-	asprintf(&i_user_s, "%s:x:%s:", image_username, image_u);
+	asprintf(&i_user_s, "%s:x:%s:", image_username, image_id);
 	asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
-	while( fgets(line_storage, sizeof(line_storage), input3) != NULL )  {
+	while( fgets(line_storage, sizeof(line_storage), input) != NULL )  {
 		check = 0;
 		sscanf(line_storage,"%[^\t\n]",buffer);
 		if(strstr(buffer,i_user_s) != NULL)  check = 1;
@@ -321,7 +336,7 @@ int prestart(const char *rootfs,
 		fputs("\n", inputnew);
 		line_num++;
 	}
-	fclose(input3);
+	fclose(input);
 	fclose(inputnew);
 
 	if (strcmp(mlabel, "") != 0) {
@@ -339,7 +354,6 @@ int prestart(const char *rootfs,
 	Ensure we've entered container mnt namespace before bind mount of /etc/passwd.
 	*/
 	if ((strcmp(self_v, proc_v) != 0) && (strcmp(proc_v, ns_v) == 0)) {
-
 		// bind mount /etc/passwd
 		if (bind_mount(newPasswdNew, dest, false) < 0) {
 			return -1;
@@ -349,7 +363,7 @@ int prestart(const char *rootfs,
 		return EXIT_FAILURE;
 	}
 
-	pr_pdebug("docker exec %s whoami", id);
+	pr_pdebug("docker exec %s id", id);
 	return EXIT_SUCCESS;
 }
 
@@ -507,6 +521,7 @@ int main(int argc, char *argv[]) {
 		if (contains_mount(config_mounts, config_mounts_len, ETC_PASSWD)) {
 			return EXIT_SUCCESS;
 		}
+
 		// bypass hook if passed in user is not numeric
 		if (atoi(cont_cu)==0){
 			return EXIT_SUCCESS;
