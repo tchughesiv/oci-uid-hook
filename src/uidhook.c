@@ -190,19 +190,29 @@ int prestart(const char *rootfs,
 		char *cPath) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
-	char nrootfs[PATH_MAX];
-	realpath(rootfs, nrootfs);
-	char dest[PATH_MAX];
-	snprintf(dest, PATH_MAX, "%s%s", nrootfs, ETC_PASSWD);
-	char *newPasswd = dest;
 	char *newPasswdNew = NULL;
 	char *image_username = NULL;
-	char *line_un = NULL;
+	char *line_uid = NULL;
 	char *image_id = NULL;
 	char *group_id = NULL;
 	char process_mnt_ns_fd[PATH_MAX];
 	snprintf(process_mnt_ns_fd, PATH_MAX, "/proc/%d/ns/mnt", pid);
 	FILE *pwd_fd = NULL;
+
+	// ensure rootfs variable exists
+	if ((strcmp(rootfs, "") == 0) || rootfs == NULL) {
+		return EXIT_SUCCESS;
+	}
+
+	char nrootfs[PATH_MAX];
+	realpath(rootfs, nrootfs);
+	char dest[PATH_MAX];
+	snprintf(dest, PATH_MAX, "%s%s", nrootfs, ETC_PASSWD);
+	char *newPasswd = dest;
+
+	// ensure host /etc/passwd & newPasswd are different files before any mods
+	// ????????????????? stat??
+	// ????????????????? something else?? maybe realpath comparison is sufficient??
 
 	if ((strcmp(cont_cu, "") == 0) || cont_cu == NULL) {
 		cont_cu = "0";
@@ -306,14 +316,14 @@ int prestart(const char *rootfs,
 
 	// create new passwd file
 	asprintf(&newPasswdNew, "%s/passwd", cPath);
-	if (image_username != NULL) {
+	if (image_id != NULL) {
 		FILE *input = fopen(newPasswd, "r");
 		FILE *inputnew = fopen(newPasswdNew, "w");
 		struct passwd *ptr;
 		uid_t cuid = atoi(cont_cu);
 		while ((ptr=fgetpwent(input))!=NULL) {
-			asprintf(&line_un, "%s", ptr->pw_name);
-			if (strcmp(line_un, image_username) == 0) {
+			asprintf(&line_uid, "%d", ptr->pw_uid);
+			if (strcmp(line_uid, image_id) == 0) {
 				ptr->pw_uid = cuid;
 			}
 			putpwent(ptr, inputnew);
