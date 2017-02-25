@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <libgen.h>
 #include <stdlib.h>
+#include <sys/types.h>
 #include <inttypes.h>
 #include <ctype.h>
 #include <stdbool.h>
@@ -10,7 +11,6 @@
 #include <syslog.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
-#include <sys/types.h>
 #include <fcntl.h>
 #include <sched.h>
 #include <unistd.h>
@@ -172,7 +172,7 @@ char *image_inspect(char *image, const char *idriver) {
 	yajl_val v_iuser = yajl_tree_get(v_iconfig, image_configs, yajl_t_string);
 	asprintf(&image_cs, "%s", YAJL_GET_STRING(v_iuser));
 
-	if (strcmp(image_cs, "") == 0) {
+	if ((strcmp(image_cs, "") == 0) || image_cs == NULL) {
 		image_cs = "0";
 	}
 
@@ -202,31 +202,74 @@ int prestart(const char *rootfs,
 		const char *cont_cu,
 		const char *mlabel,
 		const char *idriver,
-		const char *bp,
 		char *cPath) {
 	_cleanup_close_  int fd = -1;
 	_cleanup_free_   char *options = NULL;
-
-	char *image_u = image_inspect(image, idriver);
-	if (image_u == NULL) {
-		return EXIT_FAILURE;
-	}
-
-	// bypass hook if passed uid matches image user
-	if (strcmp(image_u, cont_cu) == 0) {
-		return EXIT_SUCCESS;
-	}
-
+	char nrootfs[PATH_MAX];
+	realpath(rootfs, nrootfs);
+	char dest[PATH_MAX];
+	snprintf(dest, PATH_MAX, "%s%s", nrootfs, ETC_PASSWD);
+	char *newPasswd = dest;
+	char *newPasswdNew = NULL;
+	char *image_username = NULL;
+	char *image_id = NULL;
+	char *group_id = NULL;
+	char line_storage[100], buffer[100];
+	int check, line_num = 1;
 	char process_mnt_ns_fd[PATH_MAX];
 	snprintf(process_mnt_ns_fd, PATH_MAX, "/proc/%d/ns/mnt", pid);
+	FILE *pwd_fd = NULL;
+
+	if ((strcmp(cont_cu, "") == 0) || cont_cu == NULL) {
+		cont_cu = "0";
+	}
+
+	// bypass hook if user exists with specified uid
+	pwd_fd = fopen(newPasswd, "r");
+	if (isdigit(cont_cu[0])) {
+		uid_t uid = atoi(cont_cu);
+		struct passwd *pwdt = fgetpwuid(pwd_fd, uid);
+		if (pwdt != 0) {
+			return EXIT_SUCCESS;
+		}
+	}
+	fclose(pwd_fd);
+
+	// retrieve image user
+	char *image_u = image_inspect(image, idriver);
+
+	// get user details from container passwd file
+	pwd_fd = fopen(newPasswd, "r");
+	if (isdigit(image_u[0])) {
+		uid_t uid = atoi(image_u);
+		struct passwd *pwd = fgetpwuid(pwd_fd, uid);
+		// bypass if image user doesn't exist in passwd db
+		if (pwd == 0) {
+			return EXIT_SUCCESS;
+		} else {
+		asprintf(&image_username, "%s", pwd->pw_name);
+		asprintf(&image_id, "%d", pwd->pw_uid);
+		asprintf(&group_id, "%d", pwd->pw_gid);
+		}
+	} else {
+		struct passwd *pwd = fgetpwnam(pwd_fd, image_u);
+		// bypass if image user doesn't exist in passwd db
+		if (pwd == 0) {
+			return EXIT_SUCCESS;
+		} else {
+		asprintf(&image_username, "%s", pwd->pw_name);
+		asprintf(&image_id, "%d", pwd->pw_uid);
+		asprintf(&group_id, "%d", pwd->pw_gid);
+		}
+	}
+	fclose(pwd_fd);
 
 	char *pch;
 	char *self_v;
 	char resolvedPath[PATH_MAX];
 	realpath("/proc/self/ns/mnt", resolvedPath);
 	pch = strtok(resolvedPath,":");
-	while (pch != NULL)
-	{
+	while (pch != NULL) {
 		pch = strtok(NULL, ":");
 		if (pch != NULL) {
 			self_v = pch;
@@ -238,8 +281,7 @@ int prestart(const char *rootfs,
 	char resolvedPathProc[PATH_MAX];
 	realpath(process_mnt_ns_fd, resolvedPathProc);
 	pchproc = strtok(resolvedPathProc,":");
-	while (pchproc != NULL)
-	{
+	while (pchproc != NULL) {
 		pchproc = strtok(NULL, ":");
 		if (pchproc != NULL) {
 			proc_v = pchproc;
@@ -279,91 +321,55 @@ int prestart(const char *rootfs,
 		}
 	}
 
-	char dest[PATH_MAX];
-	snprintf(dest, PATH_MAX, "%s%s", rootfs, ETC_PASSWD);
-	char *newPasswd = dest;
-	char *newPasswdNew = NULL;
-	char *image_username = NULL;
-	char *image_id = NULL;
-	char *group_id = NULL;
-	char line_storage[100], buffer[100];
-	int check, line_num = 1;
-	FILE *pwd_fd = NULL;
-
-	// bypass hook if user exists with specified uid
-	pwd_fd = fopen(newPasswd, "r");
-	if (isdigit(cont_cu[0])) {
-		uid_t uid = atoi(cont_cu);
-		struct passwd *pwd = fgetpwuid(pwd_fd, uid);
-		if (pwd != 0) {
-			return EXIT_SUCCESS;
-		}
-	}
-	fclose(pwd_fd);
-
-	// get user details from container passwd file
-	pwd_fd = fopen(newPasswd, "r");
-	if (isdigit(image_u[0])) {
-		uid_t uid = atoi(image_u);
-		struct passwd *pwd = fgetpwuid(pwd_fd, uid);
-		asprintf(&image_username, "%s", pwd->pw_name);
-		asprintf(&image_id, "%d", pwd->pw_uid);
-		asprintf(&group_id, "%d", pwd->pw_gid);
-	} else {
-		struct passwd *pwd = fgetpwnam(pwd_fd, image_u);
-		asprintf(&image_username, "%s", pwd->pw_name);
-		asprintf(&image_id, "%d", pwd->pw_uid);
-		asprintf(&group_id, "%d", pwd->pw_gid);
-	}
-	fclose(pwd_fd);
-
 	asprintf(&newPasswdNew, "%s/passwd", cPath);
-	FILE *input = fopen(newPasswd, "r");
-	FILE *inputnew = fopen(newPasswdNew, "w");
-	char *i_user_s = NULL;
-	char *i_user_r = NULL;
-	asprintf(&i_user_s, "%s:x:%s:", image_username, image_id);
-	asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
-	while( fgets(line_storage, sizeof(line_storage), input) != NULL )  {
-		check = 0;
-		sscanf(line_storage,"%[^\t\n]",buffer);
-		if(strstr(buffer,i_user_s) != NULL)  check = 1;
-		if(check != 1) {
-			fputs(buffer, inputnew);
-		} else {
-			fputs(replace_str(buffer, i_user_s, i_user_r), inputnew);
+	if (image_username != NULL) {
+		FILE *input = fopen(newPasswd, "r");
+		FILE *inputnew = fopen(newPasswdNew, "w");
+		char *i_user_s = NULL;
+		char *i_user_r = NULL;
+		asprintf(&i_user_s, "%s:x:%s:", image_username, image_id);
+		asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
+		while( fgets(line_storage, sizeof(line_storage), input) != NULL )  {
+			check = 0;
+			sscanf(line_storage,"%[^\t\n]",buffer);
+			if(strstr(buffer,i_user_s) != NULL)  check = 1;
+			if(check != 1) {
+				fputs(buffer, inputnew);
+			} else {
+				fputs(replace_str(buffer, i_user_s, i_user_r), inputnew);
+			}
+			fputs("\n", inputnew);
+			line_num++;
 		}
-		fputs("\n", inputnew);
-		line_num++;
-	}
-	fclose(input);
-	fclose(inputnew);
+		fclose(input);
+		fclose(inputnew);
 
-	if (strcmp(mlabel, "") != 0) {
 		#ifdef HAVE_SELINUX
-		if (setfilecon (newPasswdNew, mlabel) < 0) {
-			pr_perror("Failed to set context %s on %s", newPasswdNew, mlabel);
+		if (strcmp(mlabel, "") != 0) {
+			if (setfilecon (newPasswdNew, mlabel) < 0) {
+				pr_perror("Failed to set context %s on %s", newPasswdNew, mlabel);
+			}
 		}
 		#endif
-	}
 
-	chmod(newPasswdNew, 0644);
-	pr_pdebug("%s", newPasswdNew);
+		chmod(newPasswdNew, 0644);
+		pr_pdebug("%s", newPasswdNew);
 
-	/*
-	Ensure we've entered container mnt namespace before bind mount of /etc/passwd.
-	*/
-	if ((strcmp(self_v, proc_v) != 0) && (strcmp(proc_v, ns_v) == 0)) {
-		// bind mount /etc/passwd
-		if (bind_mount(newPasswdNew, dest, false) < 0) {
-			return -1;
+		/*
+		Ensure we've entered container mnt namespace before bind mount of /etc/passwd.
+		*/
+		if ((strcmp(self_v, proc_v) != 0) && (strcmp(proc_v, ns_v) == 0)) {
+			// bind mount /etc/passwd
+			if (bind_mount(newPasswdNew, newPasswd, false) < 0) {
+				return -1;
+			}
+		} else {
+			// how better error out w/o throwing oci errors? 
+			return EXIT_SUCCESS;
 		}
-	} else {
-		// how better error out w/o throwing oci errors? 
-		return EXIT_FAILURE;
-	}
 
-	pr_pdebug("docker exec %s id", id);
+		pr_pdebug("docker exec %s id", id);
+	}
 	return EXIT_SUCCESS;
 }
 
@@ -380,7 +386,7 @@ int main(int argc, char *argv[]) {
 	char *idriver = NULL;
 	char *image = NULL;
 	char *mlabel = NULL;
-	char *cPath;
+	char cPath[PATH_MAX];
 	unsigned config_mounts_len = 0;
 
 	stateData[0] = 0;
@@ -390,10 +396,10 @@ int main(int argc, char *argv[]) {
 	rd = fread((void *)stateData, 1, sizeof(stateData) - 1, stdin);
 	if (rd == 0 && !feof(stdin)) {
 		pr_perror("Error encountered on file read");
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	} else if (rd >= sizeof(stateData) - 1) {
 		pr_perror("Config file too big");
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 
 	/* Parse the state */
@@ -405,7 +411,7 @@ int main(int argc, char *argv[]) {
 		} else {
 			pr_perror("unknown error");
 		}
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 
 	/* Extract values from the state json */
@@ -413,7 +419,7 @@ int main(int argc, char *argv[]) {
 	yajl_val v_root = yajl_tree_get(node, root_path, yajl_t_string);
 	if (!v_root) {
 		pr_perror("root not found in state");
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 	char *rootfs = YAJL_GET_STRING(v_root);
 
@@ -421,7 +427,7 @@ int main(int argc, char *argv[]) {
 	yajl_val v_pid = yajl_tree_get(node, pid_path, yajl_t_number);
 	if (!v_pid) {
 		pr_perror("pid not found in state");
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 	int target_pid = YAJL_GET_INTEGER(v_pid);
 
@@ -429,20 +435,21 @@ int main(int argc, char *argv[]) {
 	yajl_val v_id = yajl_tree_get(node, id_path, yajl_t_string);
 	if (!v_id) {
 		pr_perror("id not found in state");
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 	char *id = YAJL_GET_STRING(v_id);
-
+	
+	/*
 	const char *bundle_path[] = { "bundlePath", (const char *)0 };
 	yajl_val v_bundle_path = yajl_tree_get(node, bundle_path, yajl_t_string);
 	if (!v_bundle_path) {
 		pr_perror("bundlePath not found in state");
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 	char *bp = YAJL_GET_STRING(v_bundle_path);
 	char config_file_name[PATH_MAX];
 	sprintf(config_file_name, "%s/config.json", bp);
-
+	*/
 
 	/* OCI hooks set target_pid to 0 on poststop, as the container process alreadyok
 	   exited.  If target_pid is bigger than 0 then it is the prestart hook.  */
@@ -453,15 +460,15 @@ int main(int argc, char *argv[]) {
 		/* Parse the config file */
 		if (fp == NULL) {
 			pr_perror("Failed to open config file: %s", argv[2]);
-			return EXIT_FAILURE;
+			return EXIT_SUCCESS;
 		}
 		rd = fread((void *)configData, 1, sizeof(configData) - 1, fp);
 		if (rd == 0 && !feof(fp)) {
 			pr_perror("error encountered on file read");
-			return EXIT_FAILURE;
+			return EXIT_SUCCESS;
 		} else if (rd >= sizeof(configData) - 1) {
 			pr_perror("config file too big");
-			return EXIT_FAILURE;
+			return EXIT_SUCCESS;
 		}
 
 		config_node = yajl_tree_parse((const char *)configData, errbuf, sizeof(errbuf));
@@ -472,15 +479,26 @@ int main(int argc, char *argv[]) {
 			} else {
 				pr_perror("unknown error");
 			}
-			return EXIT_FAILURE;
+			return EXIT_SUCCESS;
 		}
 
 		/* Extract values from the config json */
+		const char *config_cont[] = { "Config", (const char *)0 };
+		yajl_val v_config = yajl_tree_get(config_node, config_cont, yajl_t_object);
+		const char *cont_configs[] = { "User", (const char *)0 };
+		yajl_val v_cuser = yajl_tree_get(v_config, cont_configs, yajl_t_string);
+		asprintf(&cont_cu, "%s", YAJL_GET_STRING(v_cuser));
+
+		// bypass hook if passed in user is not numeric
+		if (isalpha(cont_cu[0])) {
+			return EXIT_SUCCESS;
+		}
+
 		const char *mount_points_path[] = { "MountPoints", (const char *)0 };
 		yajl_val v_mps = yajl_tree_get(config_node, mount_points_path, yajl_t_object);
 		if (!v_mps) {
 			pr_perror("MountPoints not found in config");
-			return EXIT_FAILURE;
+			return EXIT_SUCCESS;
 		}
 
 		config_mounts = YAJL_GET_OBJECT(v_mps)->keys;
@@ -489,8 +507,8 @@ int main(int argc, char *argv[]) {
 		const char *driver_type[] = { "Driver", (const char *)0 };
 		yajl_val v_driver = yajl_tree_get(config_node, driver_type, yajl_t_string);
 		if (!v_driver) {
-			pr_perror("Image not found in config");
-			return EXIT_FAILURE;
+			pr_perror("driver not found in config");
+			return EXIT_SUCCESS;
 		}
 		idriver = YAJL_GET_STRING(v_driver);
 
@@ -498,46 +516,34 @@ int main(int argc, char *argv[]) {
 		yajl_val v_image = yajl_tree_get(config_node, image_path, yajl_t_string);
 		if (!v_image) {
 			pr_perror("Image not found in config");
-			return EXIT_FAILURE;
+			return EXIT_SUCCESS;
 		}
 		image = YAJL_GET_STRING(v_image);
 
+		#ifdef HAVE_SELINUX
 		const char *mount_label[] = { "MountLabel", (const char *)0 };
 		yajl_val v_label = yajl_tree_get(config_node, mount_label, yajl_t_string);
 		if (!v_label) {
-			pr_perror("Image not found in config");
-			return EXIT_FAILURE;
+			pr_perror("mountlabel not found in config");
+			return EXIT_SUCCESS;
 		}
 		mlabel = YAJL_GET_STRING(v_label);
-
-		// process.user.uid
-		const char *config_cont[] = { "Config", (const char *)0 };
-		yajl_val v_config = yajl_tree_get(config_node, config_cont, yajl_t_object);
-		const char *cont_configs[] = { "User", (const char *)0 };
-		yajl_val v_cuser = yajl_tree_get(v_config, cont_configs, yajl_t_string);
-		asprintf(&cont_cu, "%s", YAJL_GET_STRING(v_cuser));
+		#endif
 
 		// bypass hook if /etc/passwd already bind mounted
 		if (contains_mount(config_mounts, config_mounts_len, ETC_PASSWD)) {
 			return EXIT_SUCCESS;
 		}
 
-		// bypass hook if passed in user is not numeric
-		if (atoi(cont_cu)==0){
-			return EXIT_SUCCESS;
+		realpath(dirname(argv[2]), cPath);
+		if (prestart(rootfs, id, target_pid, image, cont_cu, mlabel, idriver, cPath) != 0) {
+            return EXIT_SUCCESS;
 		}
-
-		cPath = dirname(argv[2]);
-		if (prestart(rootfs, id, target_pid, image, cont_cu, mlabel, idriver, bp, cPath) != 0) {
-            return EXIT_FAILURE;
-		}
-
 	} else if ((argc > 2 && !strcmp("poststop", argv[1])) || (target_pid == 0)) {
         return EXIT_SUCCESS;
 	} else {
 		pr_perror("command not recognized: %s", argv[1]);
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
-
 	return EXIT_SUCCESS;
 }
