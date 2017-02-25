@@ -79,21 +79,6 @@ DEFINE_CLEANUP_FUNC(yajl_val, yajl_tree_free)
 #define BUFLEN 1024
 #define CONFIGSZ 65536
 
-char *replace_str(char *str, char *orig, char *rep) {
-  static char buffer[4096];
-  char *p;
-
-  if(!(p = strstr(str, orig)))  // Is 'orig' even in 'str'?
-    return str;
-
-  strncpy(buffer, str, p-str); // Copy characters from 'str' start to 'orig' st$
-  buffer[p-str] = '\0';
-
-  sprintf(buffer+(p-str), "%s%s", rep, p+strlen(orig));
-
-  return buffer;
-}
-
 static int bind_mount(const char *src, const char *dest, int readonly) {
 	if (mount(src, dest, "bind", MS_BIND, NULL) == -1) {
 		pr_perror("Failed to mount %s on %s", src, dest);
@@ -212,10 +197,9 @@ int prestart(const char *rootfs,
 	char *newPasswd = dest;
 	char *newPasswdNew = NULL;
 	char *image_username = NULL;
+	char *line_un = NULL;
 	char *image_id = NULL;
 	char *group_id = NULL;
-	char line_storage[100], buffer[100];
-	int check, line_num = 1;
 	char process_mnt_ns_fd[PATH_MAX];
 	snprintf(process_mnt_ns_fd, PATH_MAX, "/proc/%d/ns/mnt", pid);
 	FILE *pwd_fd = NULL;
@@ -313,33 +297,26 @@ int prestart(const char *rootfs,
 	char resolvedPathNs[PATH_MAX];
 	realpath("/proc/self/ns/mnt", resolvedPathNs);
 	pchns = strtok(resolvedPathNs,":");
-	while (pchns != NULL)
-	{
+	while (pchns != NULL) {
 		pchns = strtok(NULL, ":");
 		if (pchns != NULL) {
 			ns_v = pchns;
 		}
 	}
 
+	// create new passwd file
 	asprintf(&newPasswdNew, "%s/passwd", cPath);
 	if (image_username != NULL) {
 		FILE *input = fopen(newPasswd, "r");
 		FILE *inputnew = fopen(newPasswdNew, "w");
-		char *i_user_s = NULL;
-		char *i_user_r = NULL;
-		asprintf(&i_user_s, "%s:x:%s:", image_username, image_id);
-		asprintf(&i_user_r, "%s:x:%s:", image_username, cont_cu);
-		while( fgets(line_storage, sizeof(line_storage), input) != NULL )  {
-			check = 0;
-			sscanf(line_storage,"%[^\t\n]",buffer);
-			if(strstr(buffer,i_user_s) != NULL)  check = 1;
-			if(check != 1) {
-				fputs(buffer, inputnew);
-			} else {
-				fputs(replace_str(buffer, i_user_s, i_user_r), inputnew);
+		struct passwd *ptr;
+		uid_t cuid = atoi(cont_cu);
+		while ((ptr=fgetpwent(input))!=NULL) {
+			asprintf(&line_un, "%s", ptr->pw_name);
+			if (strcmp(line_un, image_username) == 0) {
+				ptr->pw_uid = cuid;
 			}
-			fputs("\n", inputnew);
-			line_num++;
+			putpwent(ptr, inputnew);
 		}
 		fclose(input);
 		fclose(inputnew);
