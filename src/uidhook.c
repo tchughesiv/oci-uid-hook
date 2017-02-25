@@ -209,7 +209,7 @@ int prestart(const char *rootfs,
 
 	char *image_u = image_inspect(image, idriver);
 	if (image_u == NULL) {
-		return EXIT_FAILURE;
+		return EXIT_SUCCESS;
 	}
 
 	// bypass hook if passed uid matches image user
